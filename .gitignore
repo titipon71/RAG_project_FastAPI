@@ -24,7 +24,7 @@ ENV/
 Thumbs.db
 
 # Environment variables
-.env
+
 
 # FastAPI specific (optional)
 *.db
