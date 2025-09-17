@@ -318,7 +318,7 @@ async def read_me(current_user: User = Depends(get_current_user)):
         "role": current_user.role,
     }
 
-UPLOAD_DIR = pathlib.Path(r"D:\ECT\Project\FastAPITest\uploads")  # โฟลเดอร์ปลายทางในเครื่อง (ปรับตามจริง)
+UPLOAD_DIR = pathlib.Path(r"D:\.ECT\Project\FastAPITest\uploads")  # โฟลเดอร์ปลายทางในเครื่อง (ปรับตามจริง)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # ตรวจไฟล์ (optional)
