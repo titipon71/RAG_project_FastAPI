@@ -1,12 +1,14 @@
 # main.py
 from datetime import datetime, timedelta, timezone
 from typing import Optional, AsyncGenerator, List
+from urllib import response
 import os, uuid, pathlib
 import aiofiles
 import fastapi
 from fastapi.staticfiles import StaticFiles
 import asyncio
-from fastapi import Body, FastAPI, APIRouter, Depends, File as FormFile, Form, UploadFile, HTTPException, status, Query, Path
+from fastapi import Body, FastAPI, APIRouter, Depends, File as FormFile, Form, UploadFile, HTTPException, status, Query, Path , Request
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -24,6 +26,8 @@ import enum
 from sqlalchemy.dialects.mysql import INTEGER as MyInt, ENUM as MyEnum
 import fastapi_swagger_dark as fsd
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi_limiter import FastAPILimiter
+from fastapi_limiter.depends import RateLimiter
 
 # ---------- Settings ----------
 class Settings(BaseSettings):
@@ -48,6 +52,9 @@ class RoleChannel(str, enum.Enum):
     public = "public"
     private = "private"
 
+class RoleSender(str, enum.Enum):
+    user = "user"
+    AI = "AI"
 class Channel(Base):
     __tablename__ = "channels"
 
@@ -169,11 +176,22 @@ class sessions(Base):
     user_id: Mapped[int] = mapped_column("user_id", MyInt(unsigned=True), nullable=False)
     create_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
+class chats(Base):
+    __tablename__ = "chats"
+    chats_id: Mapped[int] = mapped_column("chats_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
+    channels_id: Mapped[int] = mapped_column("channels_id", MyInt(unsigned=True), nullable=False)
+    users_id: Mapped[int] = mapped_column("users_id", MyInt(unsigned=True), nullable=False)
+    sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), nullable=False)
+    message: Mapped[str] = mapped_column("message", String(2000), nullable=False)
+    sender_type: Mapped[RoleSender] = mapped_column("sender_type", MyEnum(RoleSender), nullable=False ,)
+    created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
+
 engine = create_async_engine(
     settings.database_url,
     echo=False,
     pool_pre_ping=True,
 )
+
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 # ---------- DB Session ----------
@@ -309,7 +327,7 @@ class ChannelOut(BaseModel):
 class ChannelUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
-    status: Optional[RoleChannel] = None
+    # status: Optional[RoleChannel] = None
 
 class ChannelListItem(BaseModel):
     channels_id: int
@@ -325,7 +343,13 @@ class ChannelUpdateStatus(BaseModel):
 
 class sessionCreate(BaseModel):
     channel_id: int
-    
+
+class chatCreate(BaseModel):
+    channels_id: int
+    users_id: int
+    sessions_id: int
+    message: str
+    sender_type: RoleSender
 # ---------- App ----------
 
 app = FastAPI(title="FastAPI + MariaDB + JWT")
@@ -481,7 +505,7 @@ async def update_user_role(
         raise HTTPException(status_code=403, detail="secret_key is incorrect")
 
     user.role = new_role
-    await db.commit()
+    await db.flush()
     await db.refresh(user)
 
     return user
@@ -682,8 +706,6 @@ async def update_channel(
         channel.title = payload.title
     if payload.description is not None:
         channel.description = payload.description
-    if payload.status is not None:
-        channel.status = payload.status
     await db.flush()
     await db.refresh(channel)
     # นับจำนวนไฟล์ใน channel
@@ -716,7 +738,7 @@ async def update_channel_status(
         raise HTTPException(status_code=403, detail="Not authorized to edit this channel")
     
     channel.status = new_status
-    await db.commit()
+    await db.flush()
     await db.refresh(channel)
     
     return ChannelUpdateStatus(
@@ -724,7 +746,7 @@ async def update_channel_status(
         status=channel.status,
     )
 
-@app.get("/channels/list", response_model=List[ChannelListItem])
+@app.get("/channels/list/", response_model=List[ChannelListItem])
 async def list_my_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
@@ -834,6 +856,37 @@ async def upload_files_only(
 
     return {"files": stored_files}
 
+@app.delete("/files/delete/{file_id}", status_code=204)
+async def delete_file(
+    # channel_id: int = Path(..., gt=0),
+    file_id: int = Path(..., gt=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(File).where(File.files_id == file_id))
+    file = result.scalar_one_or_none()
+    if file is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # ตรวจสอบสิทธิ์: admin หรือเจ้าของไฟล์ หรือเจ้าของ channel ที่ไฟล์อยู่
+    if current_user.role != RoleUser.admin and file.uploaded_by != current_user.users_id:
+        # ต้องตรวจสอบเจ้าของ channel ด้วย
+        channel = await db.execute(select(Channel).where(Channel.channels_id == file.channel_id))
+        channel = channel.scalar_one_or_none()
+        if channel is None or channel.created_by != current_user.users_id:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this file")
+
+    # ลบไฟล์จริงออกจากดิสก์
+    try:
+        p = pathlib.Path(file.storage_uri)
+        p.unlink(missing_ok=True)
+    except Exception:
+        pass  # ถ้าไฟล์หายไปแล้วก็ไม่เป็นไร
+
+    # ลบเรคคอร์ดใน DB
+    await db.delete(file)
+    return
+
 @app.post("/create/session", status_code=201)
 async def create_session(session: sessionCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     chackcidinbd = await db.execute(select(Channel).where(Channel.channels_id == session.channel_id))
@@ -846,11 +899,34 @@ async def create_session(session: sessionCreate, db: AsyncSession = Depends(get_
         user_id=current_user.users_id,
     )
     db.add(new_session)
-    await db.commit()
+    await db.flush()
     await db.refresh(new_session)
     return {"session_id": new_session.sessions_id}
 
+@app.delete("/delete/session/{session_id}", status_code=204)
+async def delete_session(session_id: int = Path(..., gt=0), db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(sessions).where(sessions.sessions_id == session_id))
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if current_user.role != RoleUser.admin and session.user_id != current_user.users_id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this session")
+    
+    await db.delete(session)
+    return
 
-
-
+@app.post("/chats", status_code=201)
+async def create_chat(chat: chatCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    new_chat = chats(
+        channels_id=chat.channels_id,
+        users_id=current_user.users_id,
+        sessions_id=chat.sessions_id,
+        message=chat.message,
+        sender_type=chat.sender_type,
+    )
+    db.add(new_chat)
+    await db.flush()
+    await db.refresh(new_chat)
+    return {"chat_id": new_chat.chats_id}
 

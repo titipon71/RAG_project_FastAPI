@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Test API – Bootstrap 5 + JavaScript</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .form-control::placeholder { /* Chrome, Firefox, Opera, Safari 10.1+ */
+            color: rgb(255, 255, 255);
+            opacity: 1; /* Firefox */
+}
+    body { background: #0b1020; color: #e8ecff; }
+    .card { background: #121733; border: 1px solid #20264b; }
+    .form-control, .form-select { background:#0f1430; color:#e8ecff; border-color:#2a3170; }
+    .form-control:focus, .form-select:focus { background:#0f1430; color:#fff; border-color:#6ea8fe; box-shadow: 0 0 0 .25rem rgba(110,168,254,.15); }
+    .btn-primary { background: #2f6df6; border-color:#2f6df6; }
+    .btn-outline-light { border-color:#4b548f; color:#cdd4ff; }
+    .btn-outline-light:hover { background:#1a2045; }
+    pre { white-space: pre-wrap; word-wrap: break-word; }
+    .monospace { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .badge-soft { background:#1d244a; color:#9fb3ff; border:1px solid #2a3170; }
+    .link-muted { color:#aab3ea; }
+    .link-muted:hover { color:#dbe1ff; }
+    .smallcaps { font-variant: small-caps; letter-spacing: .04em; }
+  </style>
+</head>
+<body>
+  <div class="container py-4">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <h1 class="h3 m-0">🧪 Test API <span class="small fw-normal text-info-emphasis">(Bootstrap 5 + JS)</span></h1>
+      <div class="d-flex gap-2">
+        <button id="btnLoadOpenAPI" class="btn btn-outline-light btn-sm" title="ลองอ่านสคีมาจาก /openapi.json">Load OpenAPI</button>
+        <button id="btnManagePresets" class="btn btn-outline-light btn-sm" title="จัดการ Presets">Presets</button>
+        <a class="btn btn-outline-light btn-sm" href="#" id="btnDownloadHtml" download="test-api.html">Download</a>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <!-- Request Builder -->
+      <div class="col-lg-5">
+        <div class="card h-100">
+          <div class="card-body text-light">
+            <div class="mb-3">
+              <label class="form-label">Base URL <span class="text-secondary">(เช่น http://localhost:8000 หรือ https://example.com)</span></label>
+              <input id="baseUrl" class="form-control" placeholder="http://atom888.3bbddns.com:16251" />
+            </div>
+            <div class="row g-2 align-items-end">
+              <div class="col-4">
+                <label class="form-label">Method</label>
+                <select id="method" class="form-select">
+                  <option>GET</option>
+                  <option>POST</option>
+                  <option>PUT</option>
+                  <option>PATCH</option>
+                  <option>DELETE</option>
+                  <option>HEAD</option>
+                  <option>OPTIONS</option>
+                </select>
+              </div>
+              <div class="col-8">
+                <label class="form-label">Path</label>
+                <input id="path" class="form-control" placeholder="/api/v1/items" />
+              </div>
+            </div>
+
+            <div class="mt-3">
+              <label class="form-label">Query Params (JSON object)</label>
+              <textarea id="query" class="form-control monospace" rows="2" placeholder='{"q":"search","page":1}'></textarea>
+            </div>
+
+            <div class="mt-3">
+              <div class="d-flex justify-content-between align-items-center">
+                <label class="form-label m-0">Headers (JSON object)</label>
+                <div class="d-flex gap-2">
+                  <button class="btn btn-sm btn-outline-light" id="btnAddBearer">Add Bearer</button>
+                  <button class="btn btn-sm btn-outline-light" id="btnAddJSON">Add JSON</button>
+                </div>
+              </div>
+              <textarea id="headers" class="form-control monospace" rows="3" placeholder='{"Authorization":"Bearer <token>", "Content-Type":"application/json"}'></textarea>
+            </div>
+
+            <div class="mt-3">
+              <div class="d-flex justify-content-between align-items-center">
+                <label class="form-label m-0">Body</label>
+                <div class="d-flex gap-2">
+                  <select id="bodyMode" class="form-select form-select-sm" style="width:auto">
+                    <option value="raw">raw (JSON / text)</option>
+                    <option value="form">multipart/form-data</option>
+                    <option value="xwww">application/x-www-form-urlencoded</option>
+                  </select>
+                  <button class="btn btn-sm btn-outline-light" id="btnBodyExamples" title="โหลดโครง JSON/ฟอร์มตัวอย่าง">Examples</button>
+                </div>
+              </div>
+
+              <div id="bodyRawBox" class="mt-2">
+                <textarea id="bodyRaw" class="form-control monospace" rows="6" placeholder='{"name":"Widget","price":99}'></textarea>
+              </div>
+
+              <div id="bodyFormBox" class="mt-2" style="display:none">
+                <div id="formRows" class="vstack gap-2"></div>
+                <div class="mt-2 d-flex gap-2">
+                  <button id="btnAddFormField" class="btn btn-outline-light btn-sm">+ Field</button>
+                  <button id="btnAddFormFile" class="btn btn-outline-light btn-sm">+ File</button>
+                </div>
+              </div>
+
+              <div id="bodyXwwwBox" class="mt-2" style="display:none">
+                <div id="xwwwRows" class="vstack gap-2"></div>
+                <div class="mt-2">
+                  <button id="btnAddXwww" class="btn btn-outline-light btn-sm">+ Key/Value</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-4 d-flex gap-2">
+              <button id="send" class="btn btn-primary">Send</button>
+              <button id="savePreset" class="btn btn-outline-light">Save Preset</button>
+              <button id="clear" class="btn btn-outline-light">Clear</button>
+            </div>
+
+            <div class="mt-3 small text-secondary">
+              <span class="badge rounded-pill badge-soft">หมายเหตุ</span>
+              ถ้า API ข้าม origin (โดเมน/พอร์ตต่างกัน) อาจต้องเปิด CORS ในเซิร์ฟเวอร์ (เช่น FastAPI: <span class="smallcaps">CORSMiddleware</span>).
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Response Panel -->
+      <div class="col-lg-7">
+        <div class="card h-100">
+          <div class="card-body d-flex flex-column">
+            <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+              <span id="statusBadge" class="badge bg-secondary">Status: –</span>
+              <span id="timeBadge" class="badge bg-secondary">Time: –</span>
+              <span id="sizeBadge" class="badge bg-secondary">Size: –</span>
+              <span id="urlBadge" class="badge bg-dark text-light"></span>
+              <div class="ms-auto d-flex gap-2">
+                <button id="btnCopyCurl" class="btn btn-outline-light btn-sm" title="คัดลอกเป็น cURL">Copy cURL</button>
+                <button id="btnSaveResponse" class="btn btn-outline-light btn-sm" title="บันทึกผลลัพธ์เป็นไฟล์">Save</button>
+              </div>
+            </div>
+
+            <ul class="nav nav-tabs" id="respTabs" role="tablist">
+              <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="pretty-tab" data-bs-toggle="tab" data-bs-target="#pretty" type="button" role="tab">Pretty</button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" id="raw-tab" data-bs-toggle="tab" data-bs-target="#raw" type="button" role="tab">Raw</button>
+              </li>
+              <li class="nav-item" role="presentation">
+                <button class="nav-link" id="headers-tab" data-bs-toggle="tab" data-bs-target="#headersBox" type="button" role="tab">Headers</button>
+              </li>
+            </ul>
+            <div class="tab-content flex-grow-1 overflow-auto" style="min-height: 320px">
+              <div class="tab-pane fade show active" id="pretty" role="tabpanel">
+                <pre id="respPretty" class="monospace mt-3"></pre>
+              </div>
+              <div class="tab-pane fade" id="raw" role="tabpanel">
+                <pre id="respRaw" class="monospace mt-3"></pre>
+              </div>
+              <div class="tab-pane fade" id="headersBox" role="tabpanel">
+                <pre id="respHeaders" class="monospace mt-3"></pre>
+              </div>
+            </div>
+
+            <div class="mt-3">
+              <label class="form-label">OpenAPI (ถ้าโหลดสำเร็จ)</label>
+              <select id="openapiPaths" class="form-select">
+                <option value="">— ไม่มี —</option>
+              </select>
+              <div class="form-text">เลือก path เพื่อกรอก Method/Path อัตโนมัติ</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="text-center text-secondary small mt-4">Made with ❤️ for quick API poking. ไม่มีการส่งข้อมูลไปที่อื่น นอกจากปลายทางที่คุณเรียก</footer>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    // ===== Utilities =====
+    const qs = sel => document.querySelector(sel);
+    const el = (t, cls) => { const x = document.createElement(t); if (cls) x.className = cls; return x; };
+    const pretty = obj => {
+      try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
+    };
+    const safeParse = (txt, fallback) => { try { return txt ? JSON.parse(txt) : fallback; } catch { return fallback; } };
+    const joinURL = (base, path) => {
+      if (!base) return path || "";
+      if (!path) return base;
+      if (base.endsWith('/') && path.startsWith('/')) return base + path.slice(1);
+      if (!base.endsWith('/') && !path.startsWith('/')) return base + '/' + path;
+      return base + path;
+    };
+
+    // Download this HTML itself
+    (function enableSelfDownload(){
+      const a = qs('#btnDownloadHtml');
+      fetch(location.href).then(r=>r.text()).then(txt=>{
+        const blob = new Blob([txt], {type:'text/html'});
+        a.href = URL.createObjectURL(blob);
+      }).catch(()=>{ a.remove(); });
+    })();
+
+    // ===== Presets (localStorage) =====
+    const LS_KEY = 'testapi.presets.v1';
+    const getPresets = () => safeParse(localStorage.getItem(LS_KEY), []);
+    const savePresets = arr => localStorage.setItem(LS_KEY, JSON.stringify(arr));
+
+    function showPresetsModal(){
+      const presets = getPresets();
+      const modal = el('div', 'modal fade');
+      modal.innerHTML = `
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content" style="background:#0f1430;color:#e8ecff;border:1px solid #2a3170">
+          <div class="modal-header">
+            <h5 class="modal-title">Presets</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            ${presets.length? '' : '<div class="text-secondary">ไม่มี Preset</div>'}
+            <div class="vstack gap-2">
+              ${presets.map((p,i)=>`
+                <div class="d-flex align-items-center justify-content-between p-2 border rounded" style="border-color:#2a3170">
+                  <div>
+                    <div class="fw-bold">${p.name||'—'}</div>
+                    <div class="small text-secondary monospace">${p.method} ${p.path} @ ${p.baseUrl}</div>
+                  </div>
+                  <div class="d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-light" data-act="load" data-i="${i}">Load</button>
+                    <button class="btn btn-sm btn-outline-light" data-act="del" data-i="${i}">Delete</button>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          </div>
+        </div>
+      </div>`;
+      document.body.appendChild(modal);
+      const bs = new bootstrap.Modal(modal);
+      modal.addEventListener('click', (e)=>{
+        const btn = e.target.closest('button[data-act]');
+        if(!btn) return;
+        const i = +btn.dataset.i;
+        const presets = getPresets();
+        if (btn.dataset.act==='load') {
+          const p = presets[i];
+          if (p) loadState(p);
+          bs.hide();
+        } else if (btn.dataset.act==='del') {
+          presets.splice(i,1); savePresets(presets);
+          bs.hide(); showPresetsModal();
+        }
+      });
+      modal.addEventListener('hidden.bs.modal', ()=> modal.remove());
+      bs.show();
+    }
+
+    function loadState(p){
+      qs('#baseUrl').value = p.baseUrl||'';
+      qs('#method').value = p.method||'GET';
+      qs('#path').value = p.path||'';
+      qs('#query').value = p.query||'';
+      qs('#headers').value = p.headers||'';
+      qs('#bodyMode').value = p.bodyMode||'raw';
+      showBodyBox();
+      qs('#bodyRaw').value = p.bodyRaw||'';
+      rebuildFormRows(p.form||[]);
+      rebuildXwwwRows(p.xwww||[]);
+    }
+
+    function currentState(){
+      return {
+        name: qs('#method').value + ' ' + qs('#path').value,
+        baseUrl: qs('#baseUrl').value.trim(),
+        method: qs('#method').value,
+        path: qs('#path').value.trim(),
+        query: qs('#query').value,
+        headers: qs('#headers').value,
+        bodyMode: qs('#bodyMode').value,
+        bodyRaw: qs('#bodyRaw').value,
+        form: getFormRows(),
+        xwww: getXwwwRows()
+      };
+    }
+
+    // ===== Form builders =====
+    function formRow(key='', val=''){ const r = el('div','row g-2'); r.innerHTML = `
+      <div class="col-5"><input class="form-control" placeholder="key" value="${key}"></div>
+      <div class="col-6"><input class="form-control" placeholder="value" value="${val}"></div>
+      <div class="col-1 d-grid"><button class="btn btn-outline-light" title="ลบ">✕</button></div>`; return r; }
+    function fileRow(key='file'){ const r = el('div','row g-2'); r.innerHTML = `
+      <div class="col-5"><input class="form-control" placeholder="key" value="${key}"></div>
+      <div class="col-6"><input type="file" class="form-control"></div>
+      <div class="col-1 d-grid"><button class="btn btn-outline-light" title="ลบ">✕</button></div>`; return r; }
+    function xwwwRow(key='', val=''){ const r = el('div','row g-2'); r.innerHTML = `
+      <div class="col-5"><input class="form-control" placeholder="key" value="${key}"></div>
+      <div class="col-6"><input class="form-control" placeholder="value" value="${val}"></div>
+      <div class="col-1 d-grid"><button class="btn btn-outline-light" title="ลบ">✕</button></div>`; return r; }
+
+    function rebuildFormRows(arr){ const box = qs('#formRows'); box.innerHTML=''; arr.forEach(it=>{ box.appendChild(it.type==='file'? fileRow(it.key) : formRow(it.key,it.value)); }); }
+    function getFormRows(){ return [...qs('#formRows').children].map(r=>{
+      const [k,v,btn] = r.querySelectorAll('input');
+      return v && v.type==='file' ? {type:'file', key:k.value} : {type:'text', key:k.value, value:v.value};
+    }); }
+
+    function rebuildXwwwRows(arr){ const box = qs('#xwwwRows'); box.innerHTML=''; arr.forEach(it=> box.appendChild(xwwwRow(it.key,it.value))); }
+    function getXwwwRows(){ return [...qs('#xwwwRows').children].map(r=>{ const [k,v] = r.querySelectorAll('input'); return {key:k.value, value:v.value}; }); }
+
+    function showBodyBox(){
+      const mode = qs('#bodyMode').value;
+      qs('#bodyRawBox').style.display = (mode==='raw')?'block':'none';
+      qs('#bodyFormBox').style.display = (mode==='form')?'block':'none';
+      qs('#bodyXwwwBox').style.display = (mode==='xwww')?'block':'none';
+    }
+
+    // ===== OpenAPI loader =====
+    async function loadOpenAPI(){
+      const base = qs('#baseUrl').value.trim();
+      if (!base) { alert('กรอก Base URL ก่อน เช่น http://localhost:8000'); return; }
+      const url = joinURL(base, '/openapi.json');
+      try {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error('HTTP '+r.status);
+        const spec = await r.json();
+        const select = qs('#openapiPaths');
+        select.innerHTML = '<option value="">— เลือก —</option>';
+        for (const [p, methods] of Object.entries(spec.paths||{})){
+          for (const m of Object.keys(methods)){
+            const opt = el('option');
+            opt.value = JSON.stringify({m:m.toUpperCase(), p});
+            opt.textContent = `${m.toUpperCase()}  ${p}`;
+            select.appendChild(opt);
+          }
+        }
+      } catch (e){
+        alert('โหลด OpenAPI ไม่สำเร็จ: '+ e.message + '\nอาจติด CORS หรือไม่มี /openapi.json');
+      }
+    }
+
+    qs('#openapiPaths').addEventListener('change', (e)=>{
+      const val = e.target.value; if (!val) return;
+      const o = JSON.parse(val);
+      qs('#method').value = o.m; qs('#path').value = o.p;
+    });
+
+    // ===== Send request =====
+    async function send(){
+      const base = qs('#baseUrl').value.trim();
+      const path = qs('#path').value.trim();
+      const method = qs('#method').value;
+      const url = new URL(joinURL(base, path));
+
+      const qobj = safeParse(qs('#query').value, {});
+      Object.entries(qobj||{}).forEach(([k,v])=> url.searchParams.set(k, v));
+
+      const hdrs = safeParse(qs('#headers').value, {});
+      const opt = { method, headers: hdrs };
+
+      const mode = qs('#bodyMode').value;
+      if (!['GET','HEAD'].includes(method)){
+        if (mode==='raw'){
+          const raw = qs('#bodyRaw').value;
+          opt.body = raw;
+          // default to JSON if looks like JSON and header not set
+          if (!opt.headers || !Object.keys(opt.headers).some(k=>k.toLowerCase()==='content-type')){
+            if (raw.trim().startsWith('{') || raw.trim().startsWith('[')) opt.headers = {...opt.headers, 'Content-Type':'application/json'};
+          }
+        } else if (mode==='form'){
+          const fd = new FormData();
+          getFormRows().forEach(it=>{
+            if (it.type==='file'){
+              const row = [...qs('#formRows').children].find(r=> r.querySelector('input').value===it.key);
+              const fileInput = row ? row.querySelector('input[type=file]') : null;
+              if (fileInput && fileInput.files[0]) fd.append(it.key, fileInput.files[0]);
+            } else {
+              fd.append(it.key, it.value);
+            }
+          });
+          opt.body = fd;
+          if (opt.headers) { // let browser set boundary
+            const ctKey = Object.keys(opt.headers).find(k=>k.toLowerCase()==='content-type');
+            if (ctKey) delete opt.headers[ctKey];
+          }
+        } else if (mode==='xwww'){
+          const usp = new URLSearchParams();
+          getXwwwRows().forEach(({key,value})=> usp.append(key, value));
+          opt.body = usp.toString();
+          opt.headers = { ...(opt.headers||{}), 'Content-Type':'application/x-www-form-urlencoded' };
+        }
+      }
+
+      qs('#urlBadge').textContent = url.toString();
+
+      const t0 = performance.now();
+      let resp, text; let size = 0;
+      try {
+        resp = await fetch(url, opt);
+        const buf = await resp.arrayBuffer();
+        size = buf.byteLength;
+        text = new TextDecoder('utf-8').decode(buf);
+      } catch (e){
+        showResult({status:'Network Error', time:0, size:0, body:''+e.message, headers:{}}, url, method, opt);
+        return;
+      }
+      const t1 = performance.now();
+
+      const headers = {}; resp.headers.forEach((v,k)=> headers[k]=v);
+      let json = null; try { json = JSON.parse(text); } catch {}
+
+      showResult({status: resp.status + ' ' + resp.statusText, time: (t1-t0).toFixed(1), size, body: json??text, raw:text, headers}, url, method, opt);
+    }
+
+    function showResult(r, url, method, opt){
+      qs('#statusBadge').className = 'badge '+ (String(r.status).startsWith('2')? 'bg-success' : String(r.status).startsWith('3')? 'bg-info' : String(r.status).startsWith('4')? 'bg-warning' : String(r.status).startsWith('5')? 'bg-danger' : 'bg-secondary');
+      qs('#statusBadge').textContent = 'Status: ' + r.status;
+      qs('#timeBadge').textContent = 'Time: ' + r.time + ' ms';
+      qs('#sizeBadge').textContent = 'Size: ' + (r.size? (r.size+' B') : '—');
+      qs('#respPretty').textContent = typeof r.body==='string' ? r.body : pretty(r.body);
+      qs('#respRaw').textContent = r.raw ?? (typeof r.body==='string'? r.body : pretty(r.body));
+      qs('#respHeaders').textContent = pretty(r.headers||{});
+
+      // Save last request for cURL
+      window.__lastReq = { url: url.toString(), method, opt };
+    }
+
+    function toCurl(){
+      const last = window.__lastReq; if (!last) return '';
+      const {url, method, opt} = last;
+      const h = opt.headers||{};
+      const hdr = Object.entries(h).map(([k,v])=>`-H ${JSON.stringify(k+': '+v)}`).join(' ');
+      let body = '';
+      if (opt.body){
+        if (opt.body instanceof FormData){
+          // best-effort (won't include files content)
+          const parts = [];
+          for (const [k,v] of opt.body.entries()){
+            if (v instanceof File) parts.push(`-F ${JSON.stringify(k+'=@'+v.name)}`); else parts.push(`-F ${JSON.stringify(k+'='+v)}`);
+          }
+          body = ' ' + parts.join(' ');
+        } else if (typeof opt.body === 'string'){
+          body = ' --data-raw ' + JSON.stringify(opt.body);
+        }
+      }
+      return `curl -X ${method} ${hdr} ${body} ${JSON.stringify(url)}`;
+    }
+
+    function saveResponse(){
+      const raw = qs('#respRaw').textContent || '';
+      const blob = new Blob([raw], {type:'application/octet-stream'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'response.txt'; a.click(); URL.revokeObjectURL(a.href);
+    }
+
+    // ===== Example helpers =====
+    qs('#btnAddBearer').addEventListener('click', ()=>{
+      const obj = safeParse(qs('#headers').value, {});
+      obj['Authorization'] = 'Bearer <token>';
+      qs('#headers').value = pretty(obj);
+    });
+    qs('#btnAddJSON').addEventListener('click', ()=>{
+      const obj = safeParse(qs('#headers').value, {});
+      obj['Content-Type'] = 'application/json';
+      qs('#headers').value = pretty(obj);
+    });
+    qs('#btnBodyExamples').addEventListener('click', ()=>{
+      const mode = qs('#bodyMode').value;
+      if (mode==='raw'){
+        qs('#bodyRaw').value = pretty({ id: 1, name: 'Alice', active: true });
+      } else if (mode==='form'){
+        rebuildFormRows([{type:'text', key:'name', value:'Alice'},{type:'file', key:'file'}]);
+      } else if (mode==='xwww'){
+        rebuildXwwwRows([{key:'name', value:'Alice'},{key:'active', value:'true'}]);
+      }
+    });
+
+    // ===== Wire up buttons =====
+    qs('#send').addEventListener('click', send);
+    qs('#clear').addEventListener('click', ()=>{
+      ['#query','#headers','#bodyRaw','#respPretty','#respRaw','#respHeaders'].forEach(s=> qs(s).value? qs(s).value='' : qs(s).textContent='');
+      rebuildFormRows([]); rebuildXwwwRows([]);
+    });
+
+    qs('#savePreset').addEventListener('click', ()=>{
+      const name = prompt('ชื่อ Preset'); if (!name) return;
+      const p = currentState(); p.name = name;
+      const arr = getPresets(); arr.push(p); savePresets(arr);
+      alert('บันทึก Preset เรียบร้อย');
+    });
+    qs('#btnManagePresets').addEventListener('click', showPresetsModal);
+    qs('#btnLoadOpenAPI').addEventListener('click', loadOpenAPI);
+    qs('#btnCopyCurl').addEventListener('click', ()=>{ const s = toCurl(); navigator.clipboard.writeText(s); alert('คัดลอก cURL แล้ว'); });
+    qs('#btnSaveResponse').addEventListener('click', saveResponse);
+
+    qs('#btnAddFormField').addEventListener('click', ()=>{ qs('#formRows').appendChild(formRow()); });
+    qs('#btnAddFormFile').addEventListener('click', ()=>{ qs('#formRows').appendChild(fileRow()); });
+    qs('#btnAddXwww').addEventListener('click', ()=>{ qs('#xwwwRows').appendChild(xwwwRow()); });
+
+    qs('#bodyMode').addEventListener('change', showBodyBox);
+
+    // Default value
+    (function init(){
+      qs('#baseUrl').value = 'http://atom888.3bbddns.com:16251';
+      qs('#path').value = '/docs'; // เปลี่ยนเป็น endpoint จริงก่อนใช้งาน
+    })();
+  </script>
+</body>
+</html>
