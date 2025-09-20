@@ -3,9 +3,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, AsyncGenerator, List
 import os, uuid, pathlib
 import aiofiles
+import fastapi
 from fastapi.staticfiles import StaticFiles
 import asyncio
-from fastapi import FastAPI, APIRouter, Depends, File as FormFile, Form, UploadFile, HTTPException, status, Query
+from fastapi import Body, FastAPI, APIRouter, Depends, File as FormFile, Form, UploadFile, HTTPException, status, Query, Path
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -21,6 +22,8 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.exc import IntegrityError
 import enum
 from sqlalchemy.dialects.mysql import INTEGER as MyInt, ENUM as MyEnum
+import fastapi_swagger_dark as fsd
+from fastapi.middleware.cors import CORSMiddleware
 
 # ---------- Settings ----------
 class Settings(BaseSettings):
@@ -103,6 +106,13 @@ class User(Base):
         autoincrement=True,
     )
 
+    # username: NOT NULL
+    username: Mapped[str] = mapped_column(
+        "username",
+        String(255),
+        nullable=False,
+    )
+    
     # name: UNIQUE, NOT NULL
     name: Mapped[str] = mapped_column(
         "name",
@@ -152,6 +162,12 @@ class File(Base):
     size_bytes: Mapped[Optional[int]] = mapped_column("size_bytes", MyInt(unsigned=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
+class sessions(Base):
+    __tablename__ = "sessions"
+    sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
+    channel_id: Mapped[int] = mapped_column("channel_id", MyInt(unsigned=True), nullable=False)
+    user_id: Mapped[int] = mapped_column("user_id", MyInt(unsigned=True), nullable=False)
+    create_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
 engine = create_async_engine(
     settings.database_url,
@@ -186,6 +202,11 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, settings.secret_key, algorithm=ALGORITHM)
 
+async def get_user_by_username(db: AsyncSession, username: str) -> Optional[User]:
+    stmt = select(User).where(User.username == username)
+    res = await db.execute(stmt)
+    return res.scalar_one_or_none()
+
 async def get_user_by_name(db: AsyncSession, name: str) -> Optional[User]:
     stmt = select(User).where(User.name == name)
     res = await db.execute(stmt)
@@ -196,8 +217,8 @@ async def get_user_by_id(db: AsyncSession, uid: int) -> Optional[User]:
     res = await db.execute(stmt)
     return res.scalar_one_or_none()
 
-async def authenticate_user(db: AsyncSession, name: str, password: str) -> Optional[User]:
-    user = await get_user_by_name(db, name)
+async def authenticate_user(db: AsyncSession, username: str, password: str) -> Optional[User]:
+    user = await get_user_by_username(db, username)
     if not user or not verify_password(password, user.hashed_password):
         return None
     return user
@@ -242,22 +263,53 @@ async def _save_upload_to_disk(uf: UploadFile, dst_path: pathlib.Path, max_size:
 
 # ---------- Schemas ----------
 class UserCreate(BaseModel):
+    username: str
     name: str
     password: str
     email: Optional[EmailStr] = None   # ตารางอนุญาตให้เป็น NULL
 
 class UserOut(BaseModel):
     users_id: int
+    username: str
     name: str
     email: Optional[EmailStr] = None
     role: RoleUser
     created_at: datetime
     class Config:
         from_attributes = True
+        
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+class UserPasswordUpdate(BaseModel):
+    old_password: str
+    new_password: str
+    confirm_password: str
+
+class UserRoleUpdate(BaseModel):
+    users_id: int
+    new_role: RoleUser
+    secret_key: str
+    
 
 class ChannelCreate(BaseModel):
     title: str
     description: Optional[str] = None
+
+class ChannelOut(BaseModel):
+    channels_id: int
+    title: str
+    description: Optional[str]
+    status: RoleChannel
+    created_at: datetime
+    files: List[dict]  # รายการไฟล์ใน channel นี้
+
+class ChannelUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[RoleChannel] = None
 
 class ChannelListItem(BaseModel):
     channels_id: int
@@ -265,10 +317,29 @@ class ChannelListItem(BaseModel):
     description: Optional[str]
     status: RoleChannel
     created_at: datetime
-    file_count: int    
+    file_count: int
+    
+class ChannelUpdateStatus(BaseModel):
+    channels_id: int
+    status: RoleChannel
 
+class sessionCreate(BaseModel):
+    channel_id: int
+    
 # ---------- App ----------
+
 app = FastAPI(title="FastAPI + MariaDB + JWT")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # ปรับเป็นโดเมนที่ต้องการอนุญาต
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# router = fastapi.APIRouter()
+# fsd.install(router)
+# app.include_router(router)
 
 @app.on_event("startup")
 async def on_startup():
@@ -277,10 +348,26 @@ async def on_startup():
 #     async with engine.begin() as conn:
 #         await conn.run_sync(Base.metadata.create_all)
 
-# สมัครผู้ใช้
-@app.post("/Rusers", response_model=UserOut, status_code=201)
+@app.get("/",status_code=200)
+async def root():
+    return {"message": "Welcome to FastAPI + MariaDB + JWT"}
+
+# ออก access token ด้วย username/password จาก DB
+@app.post("/auth/token")
+async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+    user = await authenticate_user(db, form.username, form.password)
+    if not user:
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    # sub ต้องเป็น string ตามข้อแนะนำของ JWT
+    access_token = create_access_token(data={"sub": str(user.users_id)})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# --- CRUD User ---
+# add user
+@app.post("/users", response_model=UserOut, status_code=201)
 async def register_user(payload: UserCreate, db: AsyncSession = Depends(get_db)):
     user = User(
+        username=payload.username,
         name=payload.name,
         hashed_password=hash_password(payload.password),
         email=payload.email,        # ใส่ได้หรือไม่ใส่ก็ได้ตาม schema
@@ -298,26 +385,134 @@ async def register_user(payload: UserCreate, db: AsyncSession = Depends(get_db))
     await db.refresh(user)
     return user
 
-# ออก access token ด้วย username/password จาก DB
-@app.post("/auth/token")
-async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
-    user = await authenticate_user(db, form.username, form.password)
+# Read: Get user by id
+@app.get("/users/{user_id}", response_model=UserOut)
+async def get_user_by_id_api(
+    user_id: int = Path(..., gt=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    user = await get_user_by_id(db, user_id)
     if not user:
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
-    # sub ต้องเป็น string ตามข้อแนะนำของ JWT
-    access_token = create_access_token(data={"sub": str(user.users_id)})
-    return {"access_token": access_token, "token_type": "bearer"}
+        raise HTTPException(status_code=404, detail="User not found")
+    # เฉพาะ admin หรือเจ้าของเท่านั้นที่ดูได้
+    if current_user.role != RoleUser.admin and current_user.users_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return user
+
+# Update: Update user info (username, name, email)
+
+@app.put("/users/{user_id}", response_model=UserOut)
+async def update_user(
+    user_id: int,
+    payload: UserUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if current_user.role != RoleUser.admin and current_user.users_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if payload.username is not None:
+        user.username = payload.username
+    if payload.name is not None:
+        user.name = payload.name
+    if payload.email is not None:
+        user.email = payload.email
+    try:
+        await db.flush()
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="Username, name, or email already exists")
+    await db.refresh(user)
+    return user
+
+@app.put("/users/password/{user_id}", status_code=204)
+async def update_user_password(
+    user_id: int = Path(..., gt=0),
+    payload: UserPasswordUpdate = Body(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(status_code=400, detail="New password and confirmation do not match")
+    if current_user.role != RoleUser.admin and current_user.users_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if not verify_password(payload.old_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Old password is incorrect")
+    user.hashed_password = hash_password(payload.new_password)
+    await db.flush()
+    return
+
+# Delete: Delete user
+@app.delete("/users/{user_id}", status_code=204)
+async def delete_user(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if current_user.role != RoleUser.admin and current_user.users_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    await db.delete(user)
+    return
+
+@app.put("/user/role/{user_id}/{new_role}", response_model=UserRoleUpdate)
+async def update_user_role(
+    user_id: int = Path(..., gt=0),
+    new_role: RoleUser = Path(...),
+    secret_key: str = Body(..., embed=True),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if secret_key != "4+2*3=24":
+        raise HTTPException(status_code=403, detail="secret_key is incorrect")
+
+    user.role = new_role
+    await db.commit()
+    await db.refresh(user)
+
+    return user
+
+# Read: List all users (admin only)
+@app.get("/users/list", response_model=List[UserOut])
+async def list_users(
+    skip: int = 0,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    stmt = select(User).offset(skip).limit(limit)
+    result = await db.execute(stmt)
+    users = result.scalars().all()
+    return users
 
 # Protected endpoint
-@app.get("/me")
-async def read_me(current_user: User = Depends(get_current_user)):
+@app.get("/get/userinfo/bytoken")
+async def get_user_by_token(current_user: User = Depends(get_current_user)):
     return {
         "users_id": current_user.users_id,
+        "username": current_user.username,
         "name": current_user.name,
         "email": current_user.email,
         "role": current_user.role,
     }
 
+# --- CRUD Channel & File ---
 UPLOAD_DIR = pathlib.Path(r"D:\ECT\Project\FastAPITest\uploads")  # โฟลเดอร์ปลายทางในเครื่อง (ปรับตามจริง)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -325,7 +520,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_SIZE_PER_FILE = 20 * 1024 * 1024  # 20 MB
 ALLOW_TYPES = {"application/pdf"}  # ปรับตามนโยบายคุณ
     
-@app.post("/create/channel")
+@app.post("/channels", status_code=201)
 async def create_channel(
     title: str = Form(...),
     description: str | None = Form(None),
@@ -411,7 +606,43 @@ async def create_channel(
         "files": stored_files,
     }
 
-@app.delete("/delete/channels/{channel_id}")
+@app.get("/channels/{channel_id}", response_model=ChannelOut)
+async def get_channel_details(channel_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    channel = result.scalar_one_or_none()
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    # ตรวจสอบสิทธิ์การเข้าถึง
+    if channel.status == RoleChannel.private and channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="Not authorized to access this channel")
+    
+    # ดึงรายการไฟล์ที่อยู่ใน channel นี้
+    result = await db.execute(select(File).where(File.channel_id == channel_id))
+    files = result.scalars().all()
+    
+    file_list = [
+        {
+            "files_id": f.files_id,
+            "original_filename": f.original_filename,
+            "storage_uri": f.storage_uri,
+            "size_bytes": f.size_bytes,
+            "created_at": f.created_at,
+        }
+        for f in files
+    ]
+    
+    return {
+        "channels_id": channel.channels_id,
+        "title": channel.title,
+        "description": channel.description,
+        "status": channel.status,
+        "created_at": channel.created_at,
+        "files": file_list,
+    }
+
+
+@app.delete("/channels/{channel_id}")
 async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db),current_user: User = Depends(get_current_user)):
     # ดึง channel ตาม id
     result = await db.execute(
@@ -431,13 +662,71 @@ async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db),cur
     
     # ถ้าเจอ → ลบออก
     await db.delete(channel)
-
-
     return {"message": "Channel deleted successfully"}
 
-@app.get("/channels/my", response_model=List[ChannelListItem])
+@app.put("/channels/{channel_id}", response_model=ChannelListItem)
+async def update_channel(
+    channel_id: int,
+    payload: ChannelUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    channel = result.scalar_one_or_none()
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    # เฉพาะ admin หรือเจ้าของเท่านั้นที่แก้ไขได้
+    if current_user.role != RoleUser.admin and channel.created_by != current_user.users_id:
+        raise HTTPException(status_code=403, detail="Not authorized to edit this channel")
+    if payload.title is not None:
+        channel.title = payload.title
+    if payload.description is not None:
+        channel.description = payload.description
+    if payload.status is not None:
+        channel.status = payload.status
+    await db.flush()
+    await db.refresh(channel)
+    # นับจำนวนไฟล์ใน channel
+    file_count = await db.execute(
+        select(func.count(File.files_id)).where(File.channel_id == channel.channels_id)
+    )
+    file_count = file_count.scalar() or 0
+    return ChannelListItem(
+        channels_id=channel.channels_id,
+        title=channel.title,
+        description=channel.description,
+        status=channel.status,
+        created_at=channel.created_at,
+        file_count=file_count,
+    )
+
+@app.put("/channels/status/{channel_id}", response_model=ChannelUpdateStatus)
+async def update_channel_status(
+    channel_id: int,
+    new_status: RoleChannel = Path(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    channel = result.scalar_one_or_none()
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    # เฉพาะ admin เท่านั้นที่แก้ไขได้
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="Not authorized to edit this channel")
+    
+    channel.status = new_status
+    await db.commit()
+    await db.refresh(channel)
+    
+    return ChannelUpdateStatus(
+        channels_id=channel.channels_id,
+        status=channel.status,
+    )
+
+@app.get("/channels/list", response_model=List[ChannelListItem])
 async def list_my_channels(
-    q: str | None = Query(None, description="ค้นหาจากชื่อ"),
+    search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
     limit: int = 20,
     db: AsyncSession = Depends(get_db),
@@ -452,8 +741,8 @@ async def list_my_channels(
         .offset(skip)
         .limit(limit)
     )
-    if q:
-        stmt = stmt.where(Channel.title.like(f"%{q}%"))
+    if search_by_name:
+        stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
 
     result = await db.execute(stmt)
     rows = result.all()
@@ -544,3 +833,24 @@ async def upload_files_only(
         raise
 
     return {"files": stored_files}
+
+@app.post("/create/session", status_code=201)
+async def create_session(session: sessionCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    chackcidinbd = await db.execute(select(Channel).where(Channel.channels_id == session.channel_id))
+    chackcidinbd = chackcidinbd.scalar_one_or_none()
+    if chackcidinbd is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    new_session = sessions(
+        channel_id=session.channel_id,
+        user_id=current_user.users_id,
+    )
+    db.add(new_session)
+    await db.commit()
+    await db.refresh(new_session)
+    return {"session_id": new_session.sessions_id}
+
+
+
+
+
