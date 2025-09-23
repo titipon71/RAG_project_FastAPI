@@ -33,7 +33,7 @@ from fastapi_limiter.depends import RateLimiter
 class Settings(BaseSettings):
     database_url: str
     secret_key: str = "dev-secret"
-    access_token_expire_minutes: int = 30
+    access_token_expire_minutes: int = 720
 
     class Config:
         env_file = ".env"
@@ -511,7 +511,7 @@ async def update_user_role(
     return user
 
 # Read: List all users (admin only)
-@app.get("/users/list", response_model=List[UserOut])
+@app.get("/users/list/", response_model=List[UserOut])
 async def list_users(
     skip: int = 0,
     limit: int = 20,
