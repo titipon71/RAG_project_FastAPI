@@ -332,10 +332,18 @@ class ChannelUpdate(BaseModel):
 class ChannelListItem(BaseModel):
     channels_id: int
     title: str
-    description: Optional[str]
+    description: Optional[str] = None
     status: RoleChannel
     created_at: datetime
     file_count: int
+    
+class ChannelListPublicItem(BaseModel):
+    channels_id: int
+    title: str
+    description: Optional[str] = None
+    status: RoleChannel
+    created_at: datetime
+    files: List[dict]  # รายการไฟล์ใน channel นี้
     
 class ChannelUpdateStatus(BaseModel):
     channels_id: int
@@ -630,6 +638,7 @@ async def create_channel(
         "files": stored_files,
     }
 
+
 @app.get("/channels/{channel_id}", response_model=ChannelOut)
 async def get_channel_details(channel_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
@@ -745,6 +754,52 @@ async def update_channel_status(
         channels_id=channel.channels_id,
         status=channel.status,
     )
+
+@app.get("/channels/public/list/", response_model=List[ChannelListPublicItem])
+async def list_public_channels(
+    search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
+    skip: int = 0,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = (
+        select(Channel)
+        .where(Channel.status == RoleChannel.public)
+        .order_by(Channel.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    if search_by_name:
+        stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
+
+    result = await db.execute(stmt)
+    channels = result.scalars().all()
+
+    channel_list = []
+    for ch in channels:
+        # ดึงรายการไฟล์ในแต่ละ channel
+        file_result = await db.execute(select(File).where(File.channel_id == ch.channels_id))
+        files = file_result.scalars().all()
+        file_list = [
+            {
+                "files_id": f.files_id,
+                "original_filename": f.original_filename,
+                "storage_uri": f.storage_uri,
+                "size_bytes": f.size_bytes,
+                "created_at": f.created_at,
+            }
+            for f in files
+        ]
+        channel_list.append(ChannelListPublicItem(
+            channels_id=ch.channels_id,
+            title=ch.title,
+            description=ch.description,
+            status=ch.status,
+            created_at=ch.created_at,
+            files=file_list,
+        ))
+
+    return channel_list
 
 @app.get("/channels/list/", response_model=List[ChannelListItem])
 async def list_my_channels(
