@@ -2,13 +2,9 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional, AsyncGenerator, List
 from urllib import response
-import os, uuid, pathlib
+import uuid, pathlib
 import aiofiles
-import fastapi
-from fastapi.staticfiles import StaticFiles
-import asyncio
 from fastapi import Body, FastAPI, APIRouter, Depends, File as FormFile, Form, UploadFile, HTTPException, status, Query, Path , Request
-from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -24,10 +20,14 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.exc import IntegrityError
 import enum
 from sqlalchemy.dialects.mysql import INTEGER as MyInt, ENUM as MyEnum
-import fastapi_swagger_dark as fsd
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi_limiter import FastAPILimiter
-from fastapi_limiter.depends import RateLimiter
+# from fastapi.staticfiles import StaticFiles
+# import fastapi
+# import asyncio
+# import fastapi_swagger_dark as fsd
+# from fastapi_limiter import FastAPILimiter
+# from fastapi_limiter.depends import RateLimiter
+# from fastapi.responses import JSONResponse
 
 # ---------- Settings ----------
 class Settings(BaseSettings):
@@ -358,6 +358,9 @@ class chatCreate(BaseModel):
     sessions_id: int
     message: str
     sender_type: RoleSender
+    
+class message(BaseModel):
+    message: str
 # ---------- App ----------
 
 app = FastAPI(title="FastAPI + MariaDB + JWT")
