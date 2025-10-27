@@ -17,11 +17,13 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
 )
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import IntegrityError
 import enum
 from sqlalchemy.dialects.mysql import INTEGER as MyInt, ENUM as MyEnum
 from fastapi.middleware.cors import CORSMiddleware
-# from fastapi.staticfiles import StaticFiles
+import os, secrets
+
 # import fastapi
 # import asyncio
 # import fastapi_swagger_dark as fsd
@@ -34,11 +36,13 @@ class Settings(BaseSettings):
     database_url: str
     secret_key: str = "dev-secret"
     access_token_expire_minutes: int = 720
-
+    upload_root: pathlib.Path = pathlib.Path("./uploads")
     class Config:
         env_file = ".env"
 
 settings = Settings()
+
+
 
 # ---------- DB Setup ----------
 class Base(DeclarativeBase):
@@ -84,6 +88,7 @@ class Channel(Base):
         "status",
         SAEnum(RoleChannel),                       # ผูกกับ enum ของ MySQL
         nullable=False,
+        default=RoleChannel.private,
         server_default=text("'private'"),      # ให้ default ฝั่ง DB ตรงกับสคีมา
     )
 
@@ -174,7 +179,7 @@ class sessions(Base):
     sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
     channel_id: Mapped[int] = mapped_column("channel_id", MyInt(unsigned=True), nullable=False)
     user_id: Mapped[int] = mapped_column("user_id", MyInt(unsigned=True), nullable=False)
-    create_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
 class chats(Base):
     __tablename__ = "chats"
@@ -364,9 +369,18 @@ class message(BaseModel):
 # ---------- App ----------
 
 app = FastAPI(title="FastAPI + MariaDB + JWT")
+
+# ---------- File/Static ----------
+UPLOAD_ROOT = settings.upload_root
+UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+
+app.mount("/static/uploads", StaticFiles(directory=UPLOAD_ROOT), name="uploads")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # ปรับเป็นโดเมนที่ต้องการอนุญาต
+    allow_origins=["http://localhost:3000",
+                    "http://127.0.0.1:3000",
+                   ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -497,7 +511,7 @@ async def delete_user(
     await db.delete(user)
     return
 
-@app.put("/user/role/{user_id}/{new_role}", response_model=UserRoleUpdate)
+@app.put("/user/role/{user_id}/{new_role}", response_model=UserOut)
 async def update_user_role(
     user_id: int = Path(..., gt=0),
     new_role: RoleUser = Path(...),
@@ -548,13 +562,49 @@ async def get_user_by_token(current_user: User = Depends(get_current_user)):
     }
 
 # --- CRUD Channel & File ---
-UPLOAD_DIR = pathlib.Path(r"D:\ECT\Project\FastAPITest\uploads")  # โฟลเดอร์ปลายทางในเครื่อง (ปรับตามจริง)
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 
 # ตรวจไฟล์ (optional)
 MAX_SIZE_PER_FILE = 20 * 1024 * 1024  # 20 MB
-ALLOW_TYPES = {"application/pdf"}  # ปรับตามนโยบายคุณ
-    
+ALLOW_MIME = {"application/pdf"}
+
+try:
+    import magic
+    def sniff_mime(path: pathlib.Path) -> str:
+        return magic.from_file(str(path), mime=True) or "application/octet-stream"
+except Exception:
+    def sniff_mime(path: pathlib.Path) -> str:
+        # fallback อย่างน้อยใช้สกุลไฟล์
+        return "application/pdf" if path.suffix.lower() == ".pdf" else "application/octet-stream"
+
+def _build_storage_path(channel_id: int, filename: str) -> tuple[pathlib.Path, str]:
+    """คืน (abs_path, relative_path) โดย relative ใช้เก็บใน DB"""
+    ext = pathlib.Path(filename or "").suffix.lower()
+    uid = secrets.token_hex(16)  # uuid ก็ได้
+    today = datetime.utcnow()
+    rel = pathlib.Path(str(channel_id)) / f"{today:%Y}" / f"{today:%m}" / f"{uid}{ext}"
+    abs_path = UPLOAD_ROOT / rel
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+    return abs_path, str(rel).replace("\\", "/")  # normalize
+
+async def _save_upload_atomic(uf: UploadFile, final_path: pathlib.Path, max_size: int) -> int:
+    """เขียนไฟล์ลง temp แล้ว atomic replace ไปยังปลายทาง"""
+    tmp_path = final_path.with_suffix(final_path.suffix + ".tmp")
+    size_bytes = 0
+    async with aiofiles.open(tmp_path, "wb") as f:
+        while True:
+            chunk = await uf.read(1024 * 1024)
+            if not chunk:
+                break
+            size_bytes += len(chunk)
+            if size_bytes > max_size:
+                await uf.close()
+                raise HTTPException(status_code=413, detail=f"File too large: {uf.filename}")
+            await f.write(chunk)
+    # replace แบบ atomic
+    os.replace(tmp_path, final_path)
+    return size_bytes
+
 @app.post("/channels", status_code=201)
 async def create_channel(
     title: str = Form(...),
@@ -564,62 +614,58 @@ async def create_channel(
     current_user: User = Depends(get_current_user),
 ):
     # 1) สร้าง channel
-    channel = Channel(title=title, description=description, created_by=current_user.users_id)
+    channel = Channel(title=title, description=description, created_by=current_user.users_id, status=RoleChannel.private)
     db.add(channel)
-    await db.flush()  # ให้ได้ channels_id
+    await db.flush()  # ได้ channels_id
+
+    await db.refresh(channel, attribute_names=["channels_id", "status", "created_at"])
+    is_public = (channel.status == RoleChannel.public)
 
     stored_files: list[dict] = []
     created_paths: list[pathlib.Path] = []
 
     try:
         if uploaded_files:
+            if len(uploaded_files) > 10:
+                raise HTTPException(status_code=400, detail="Too many files in one request")
+            
             for uf in uploaded_files:
-                # ตรวจชนิดไฟล์ (header)
-                if uf.content_type not in ALLOW_TYPES:
-                    raise HTTPException(status_code=400, detail=f"Unsupported file type: {uf.content_type}")
+                
+                final_path, rel_path = _build_storage_path(channel.channels_id, uf.filename)
+                
+                # 2) เขียนไฟล์ async + ตรวจขนาด
+                size_bytes = await _save_upload_atomic(uf, final_path, MAX_SIZE_PER_FILE)
+                created_paths.append(final_path)
+                await uf.close()
 
-                # สร้างชื่อไฟล์ปลอดภัย
-                suffix = pathlib.Path(uf.filename or "").suffix
-                safe_name = f"{uuid.uuid4().hex}{suffix}"
-                disk_path = UPLOAD_DIR / safe_name
+                # 3) ตรวจ mime จริง (optional)
+                detected = sniff_mime(final_path)
+                if detected not in ALLOW_MIME:
+                    # ลบทิ้งถ้าไม่ผ่าน
+                    final_path.unlink(missing_ok=True)
+                    raise HTTPException(status_code=400, detail=f"Unsupported file type: {detected}")
 
-                # เขียนไฟล์ลงดิสก์ (จะให้ดีใช้ aiofiles)
-                size_counter = 0
-                try:
-                    with open(disk_path, "wb") as f:
-                        while True:
-                            chunk = await uf.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            size_counter += len(chunk)
-                            if size_counter > MAX_SIZE_PER_FILE:
-                                raise HTTPException(status_code=413, detail=f"File too large: {uf.filename}")
-                            f.write(chunk)
-                    created_paths.append(disk_path)
-                finally:
-                    await uf.close()
-
-                # (ถ้ามี StaticFiles ให้ map เป็น URL จริง เช่น /static/uploads/<safe_name>)
-                storage_uri = str(disk_path)  # เก็บเป็น path ภายในให้ชัดเจนก่อน
-
-                file_row = File(
+                # 4) บันทึก DB โดยเก็บ relative path
+                frow = File(
                     uploaded_by=current_user.users_id,
                     channel_id=channel.channels_id,
-                    original_filename=uf.filename or safe_name,
-                    storage_uri=storage_uri,
-                    size_bytes=size_counter,
+                    original_filename=uf.filename or final_path.name,
+                    storage_uri=rel_path,            # << เก็บ relative
+                    size_bytes=size_bytes,
                 )
-                db.add(file_row)
-                await db.flush()  # เอา files_id
+                db.add(frow)
+                await db.flush()
 
-                stored_files.append({
-                    "files_id": file_row.files_id,
-                    "original_filename": file_row.original_filename,
-                    "storage_uri": file_row.storage_uri,
-                    "size_bytes": file_row.size_bytes,
-                })
+                resp = {
+                    "files_id": frow.files_id,
+                    "original_filename": frow.original_filename,
+                    "size_bytes": size_bytes,
+                    "mime": detected,
+                }
+                if is_public:
+                    resp["public_url"] = f"/static/uploads/{rel_path}"
+                stored_files.append(resp)
 
-        # โหลดค่า default (เช่น status) ให้ชัวร์ก่อนส่งคืน
         await db.refresh(channel)
 
     except Exception:
@@ -657,16 +703,17 @@ async def get_channel_details(channel_id: int, db: AsyncSession = Depends(get_db
     result = await db.execute(select(File).where(File.channel_id == channel_id))
     files = result.scalars().all()
     
-    file_list = [
-        {
+    file_list = []
+    for f in files:
+        item = {
             "files_id": f.files_id,
             "original_filename": f.original_filename,
-            "storage_uri": f.storage_uri,
             "size_bytes": f.size_bytes,
             "created_at": f.created_at,
         }
-        for f in files
-    ]
+        if channel.status == RoleChannel.public:
+            item["public_url"] = f"/static/uploads/{f.storage_uri}"
+        file_list.append(item)
     
     return {
         "channels_id": channel.channels_id,
@@ -696,7 +743,14 @@ async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db),cur
             detail="Not authorized to delete this channel"
         ) 
     
-    # ถ้าเจอ → ลบออก
+    # ลบไฟล์ในช่องทั้ง DB + ดิสก์
+    file_rows = (await db.execute(select(File).where(File.channel_id == channel.channels_id))).scalars().all()
+    for fr in file_rows:
+        try:
+            (UPLOAD_ROOT / fr.storage_uri).unlink(missing_ok=True)
+        except Exception:
+            pass
+        await db.delete(fr)
     await db.delete(channel)
     return {"message": "Channel deleted successfully"}
 
@@ -737,7 +791,7 @@ async def update_channel(
 @app.put("/channels/status/{channel_id}", response_model=ChannelUpdateStatus)
 async def update_channel_status(
     channel_id: int,
-    new_status: RoleChannel = Path(...),
+    new_status: RoleChannel = Body(..., embed=True),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -841,7 +895,7 @@ async def list_my_channels(
     
 @app.post("/files/upload", status_code=201)
 async def upload_files_only(
-    channel_id: int = Form(None),          
+    channel_id: int = Form(...),          
     files: list[UploadFile] = FormFile(...),      # รับหลายไฟล์
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -855,53 +909,51 @@ async def upload_files_only(
     # 2) ตรวจสอบสิทธิ์เจ้าของ channel
     if channel.created_by != current_user.users_id:
         raise HTTPException(status_code=403, detail="Not authorized to upload to this channel")
-
+    
+    # 3) จำกัดจำนวนไฟล์ต่อ request
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Too many files in one request")
+    
     stored_files: list[dict] = []
     created_paths: list[pathlib.Path] = []
 
     try:
         for uf in files:
-            # ตรวจชนิดไฟล์ตามนโยบาย
-            if uf.content_type not in ALLOW_TYPES:
-                raise HTTPException(status_code=400, detail=f"Unsupported file type: {uf.content_type}")
+            
+            final_path, rel_path = _build_storage_path(channel_id, uf.filename)
 
-            # ตั้งชื่อไฟล์ให้ปลอดภัย
-            suffix = pathlib.Path(uf.filename or "").suffix
-            safe_name = f"{uuid.uuid4().hex}{suffix}"
-            disk_path = UPLOAD_DIR / safe_name
+            # 4) เขียนไฟล์แบบ async + atomic และตรวจขนาด
+            size_bytes = await _save_upload_atomic(uf, final_path, MAX_SIZE_PER_FILE)
+            created_paths.append(final_path)
+            await uf.close()
 
-            try:
-                size_bytes = await _save_upload_to_disk(uf, disk_path, MAX_SIZE_PER_FILE)
-                created_paths.append(disk_path)
-            finally:
-                await uf.close()
+            # 5) ตรวจ MIME จริงจากไฟล์ (ถ้ามี python-magic)
+            detected_mime = sniff_mime(final_path)
+            if detected_mime not in ALLOW_MIME:
+                final_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=400, detail=f"Unsupported file type: {detected_mime}")
 
-            # เก็บเป็น path ภายใน (หรือจะแมปเป็น URL เสิร์ฟจริงก็ได้)
-            storage_uri = str(disk_path)
-
-            # บันทึก DB
+            # 6) บันทึก DB โดยเก็บ 'relative path'
             frow = File(
                 uploaded_by=current_user.users_id,
                 channel_id=channel_id,
-                original_filename=uf.filename or safe_name,
-                storage_uri=storage_uri,
+                original_filename=uf.filename or final_path.name,
+                storage_uri=rel_path,         # << เก็บ relative เช่น "12/2025/10/uuid.pdf"
                 size_bytes=size_bytes,
             )
             db.add(frow)
             await db.flush()  # ได้ files_id
 
-            # ถ้าคุณ mount /static ตามด้านบน จะทำ public URL ง่ายๆ ได้แบบนี้:
-            public_url = f"/static/uploads/{safe_name}"
-
-            stored_files.append({
+            resp = {
                 "files_id": frow.files_id,
                 "original_filename": frow.original_filename,
-                "storage_uri": storage_uri,   # path ภายใน
-                # "public_url": public_url,     # URL สำหรับเข้าถึง (ถ้าต้องการ)
                 "size_bytes": size_bytes,
-                "content_type": uf.content_type,
+                "mime": detected_mime,   # ใช้ที่ sniff ได้เอง
                 "channel_id": channel_id,
-            })
+            }
+            if channel.status == RoleChannel.public:
+                resp["public_url"] = f"/static/uploads/{rel_path}"
+            stored_files.append(resp)
 
     except Exception:
         # ลบไฟล์ที่เขียนไปแล้วถ้ามี error
@@ -936,7 +988,7 @@ async def delete_file(
 
     # ลบไฟล์จริงออกจากดิสก์
     try:
-        p = pathlib.Path(file.storage_uri)
+        p = UPLOAD_ROOT / file.storage_uri
         p.unlink(missing_ok=True)
     except Exception:
         pass  # ถ้าไฟล์หายไปแล้วก็ไม่เป็นไร
