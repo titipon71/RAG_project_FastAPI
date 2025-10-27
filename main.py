@@ -13,9 +13,9 @@ from pydantic_settings import BaseSettings
 from sqlalchemy import String, func, select ,Enum as SAEnum, ForeignKey, text
 from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase
 from sqlalchemy.ext.asyncio import (
+    create_async_engine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 from sqlalchemy.exc import IntegrityError
 import enum
