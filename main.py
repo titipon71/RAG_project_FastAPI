@@ -1,11 +1,14 @@
 # main.py
+import asyncio
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Optional, AsyncGenerator, List
-from urllib import response
+# from urllib import response
 import uuid, pathlib
 import aiofiles
-from fastapi import Body, FastAPI, APIRouter, Depends, File as FormFile, Form, UploadFile, HTTPException, status, Query, Path , Request
+from fastapi import Body, FastAPI, APIRouter, Depends, File as FormFile, Form, UploadFile, HTTPException, status, Query, Path , Request, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+# import httpx
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel , EmailStr
@@ -23,6 +26,12 @@ import enum
 from sqlalchemy.dialects.mysql import INTEGER as MyInt, ENUM as MyEnum
 from fastapi.middleware.cors import CORSMiddleware
 import os, secrets
+from llama_index.core import SimpleDirectoryReader
+from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
+
+from rag_engine import add_documents, rag_query, rag_query_with_channel
 
 # import fastapi
 # import asyncio
@@ -31,12 +40,14 @@ import os, secrets
 # from fastapi_limiter.depends import RateLimiter
 # from fastapi.responses import JSONResponse
 
+API_KEY = os.getenv("API_KEY")
 # ---------- Settings ----------
 class Settings(BaseSettings):
     database_url: str
     secret_key: str = "dev-secret"
     access_token_expire_minutes: int = 720
     upload_root: pathlib.Path = pathlib.Path("./uploads")
+    api_key: str = API_KEY
     class Config:
         env_file = ".env"
 
@@ -183,7 +194,7 @@ class sessions(Base):
 
 class chats(Base):
     __tablename__ = "chats"
-    chats_id: Mapped[int] = mapped_column("chats_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column("chat_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
     channels_id: Mapped[int] = mapped_column("channels_id", MyInt(unsigned=True), nullable=False)
     users_id: Mapped[int] = mapped_column("users_id", MyInt(unsigned=True), nullable=False)
     sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), nullable=False)
@@ -211,10 +222,24 @@ ALGORITHM = "HS256"
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
 
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+def _truncate_bcrypt(p: str) -> str:
+    # bcrypt limit is 72 *bytes*; เข้าง่ายๆ ด้วย utf-8 แล้วตัด
+    b = p.encode("utf-8")
+    if len(b) > 72:
+        b = b[:72]
+    return b.decode("utf-8", errors="ignore")
+
+# def verify_password(plain: str, hashed: str) -> bool:
+#     plain = _truncate_bcrypt(plain)
+#     return pwd_context.verify(plain, hashed)
+
+def verify_password(plain: str, stored: str) -> bool:
+    # ตอนนี้รหัสใน DB ยังเป็น plain text อยู่
+    return plain == stored
+
 
 def hash_password(plain: str) -> str:
+    plain = _truncate_bcrypt(plain)
     return pwd_context.hash(plain)
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -268,6 +293,52 @@ async def get_current_user(
     if not user:
         raise credentials_exception
     return user
+
+async def get_owned_session(
+    db: AsyncSession,
+    session_id: int,
+    user_id: int,
+):
+    stmt = (
+        select(sessions)
+        .where(
+            sessions.sessions_id == session_id,
+            sessions.user_id == user_id,   # สำคัญ! ต้องเป็นของคนนี้จริง
+        )
+    )
+    res = await db.execute(stmt)
+    return res.scalar_one_or_none()
+
+
+def get_rag_query_with_channel():
+    from rag_engine import rag_query_with_channel
+    return rag_query_with_channel
+
+
+async def call_ai(messages: List[dict], channel_id: int) -> str:
+
+    # หา user message ตัวท้ายสุด
+    last_user_msg = None
+    for m in reversed(messages):
+        if m["role"] == "user":
+            last_user_msg = m["content"]
+            break
+    if last_user_msg is None:
+        last_user_msg = "สรุปข้อมูลจากฐานเอกสารให้หน่อย"
+
+    # LlamaIndex เป็น sync → offload ไป thread จะปลอดภัยกว่า
+    loop = asyncio.get_running_loop()
+    # rag_query_with_channel_func = get_rag_query_with_channel()
+    answer = await loop.run_in_executor(None, rag_query_with_channel, last_user_msg, channel_id)
+    return answer
+
+def get_rag_query():
+    from rag_engine import rag_query
+    return rag_query
+
+def get_rag_index():
+    from rag_engine import index
+    return index    
 
 # ---------- ตัวช่วยเซฟไฟล์แบบ async ----------
 async def _save_upload_to_disk(uf: UploadFile, dst_path: pathlib.Path, max_size: int) -> int:
@@ -363,12 +434,22 @@ class chatCreate(BaseModel):
     sessions_id: int
     message: str
     sender_type: RoleSender
-    
+
+class chatHistoryItem(BaseModel):
+    chat_id: int
+    channels_id: int
+    users_id: int
+    sessions_id: int
+    message: str
+    sender_type: RoleSender
+    created_at: datetime
+
 class message(BaseModel):
     message: str
 # ---------- App ----------
 
 app = FastAPI(title="FastAPI + MariaDB + JWT")
+templates = Jinja2Templates(directory="templates")
 
 # ---------- File/Static ----------
 UPLOAD_ROOT = settings.upload_root
@@ -378,9 +459,12 @@ app.mount("/static/uploads", StaticFiles(directory=UPLOAD_ROOT), name="uploads")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000",
-                    "http://127.0.0.1:3000",
-                   ],
+    allow_origins=["192.168.1.122:3000", 
+                   "http://localhost:3000", 
+                   "http://127.0.0.1:3000",
+                   "http://127.0.0.1:5500",
+                   "https://lukeenortaed.site", 
+                   "https://www.lukeenortaed.site"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -397,9 +481,22 @@ async def on_startup():
 #     async with engine.begin() as conn:
 #         await conn.run_sync(Base.metadata.create_all)
 
-@app.get("/",status_code=200)
-async def root():
-    return {"message": "Welcome to FastAPI + MariaDB + JWT"}
+@app.get("/",status_code=200,response_class=HTMLResponse)
+async def root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.get("/healthz", response_class=PlainTextResponse)
+def healthz_get():
+    return "ok"
+
+@app.head("/healthz")
+def healthz_head():
+    return Response(status_code=200)
+
+# ถ้ายังอยากให้ HEAD ที่ "/" ใช้ได้ด้วย
+@app.head("/")
+def root_head():
+    return Response(status_code=200)
 
 # ออก access token ด้วย username/password จาก DB
 @app.post("/auth/token")
@@ -418,7 +515,7 @@ async def register_user(payload: UserCreate, db: AsyncSession = Depends(get_db))
     user = User(
         username=payload.username,
         name=payload.name,
-        hashed_password=hash_password(payload.password),
+        hashed_password=payload.password,
         email=payload.email,        # ใส่ได้หรือไม่ใส่ก็ได้ตาม schema
         # role ไม่ต้องส่ง → DB ใส่ default 'user' ให้เอง
     )
@@ -492,7 +589,7 @@ async def update_user_password(
         raise HTTPException(status_code=403, detail="Not authorized")
     if not verify_password(payload.old_password, user.hashed_password):
         raise HTTPException(status_code=400, detail="Old password is incorrect")
-    user.hashed_password = hash_password(payload.new_password)
+    user.hashed_password = payload.new_password
     await db.flush()
     return
 
@@ -565,8 +662,9 @@ async def get_user_by_token(current_user: User = Depends(get_current_user)):
 
 
 # ตรวจไฟล์ (optional)
-MAX_SIZE_PER_FILE = 20 * 1024 * 1024  # 20 MB
-ALLOW_MIME = {"application/pdf"}
+MAX_SIZE_PER_FILE = 50 * 1024 * 1024  # 50 MB
+ALLOW_MIME = {"application/pdf",
+              "text/plain"}
 
 try:
     import magic
@@ -581,8 +679,7 @@ def _build_storage_path(channel_id: int, filename: str) -> tuple[pathlib.Path, s
     """คืน (abs_path, relative_path) โดย relative ใช้เก็บใน DB"""
     ext = pathlib.Path(filename or "").suffix.lower()
     uid = secrets.token_hex(16)  # uuid ก็ได้
-    today = datetime.utcnow()
-    rel = pathlib.Path(str(channel_id)) / f"{today:%Y}" / f"{today:%m}" / f"{uid}{ext}"
+    rel = pathlib.Path(str(channel_id)) / f"{uid}{ext}"
     abs_path = UPLOAD_ROOT / rel
     abs_path.parent.mkdir(parents=True, exist_ok=True)
     return abs_path, str(rel).replace("\\", "/")  # normalize
@@ -605,6 +702,7 @@ async def _save_upload_atomic(uf: UploadFile, final_path: pathlib.Path, max_size
     os.replace(tmp_path, final_path)
     return size_bytes
 
+# --- แทนที่ฟังก์ชัน create_channel ทั้งก้อนด้วยเวอร์ชันนี้ ---
 @app.post("/channels", status_code=201)
 async def create_channel(
     title: str = Form(...),
@@ -614,7 +712,12 @@ async def create_channel(
     current_user: User = Depends(get_current_user),
 ):
     # 1) สร้าง channel
-    channel = Channel(title=title, description=description, created_by=current_user.users_id, status=RoleChannel.private)
+    channel = Channel(
+        title=title,
+        description=description,
+        created_by=current_user.users_id,
+        status=RoleChannel.private
+    )
     db.add(channel)
     await db.flush()  # ได้ channels_id
 
@@ -630,9 +733,8 @@ async def create_channel(
                 raise HTTPException(status_code=400, detail="Too many files in one request")
             
             for uf in uploaded_files:
-                
                 final_path, rel_path = _build_storage_path(channel.channels_id, uf.filename)
-                
+
                 # 2) เขียนไฟล์ async + ตรวจขนาด
                 size_bytes = await _save_upload_atomic(uf, final_path, MAX_SIZE_PER_FILE)
                 created_paths.append(final_path)
@@ -641,7 +743,6 @@ async def create_channel(
                 # 3) ตรวจ mime จริง (optional)
                 detected = sniff_mime(final_path)
                 if detected not in ALLOW_MIME:
-                    # ลบทิ้งถ้าไม่ผ่าน
                     final_path.unlink(missing_ok=True)
                     raise HTTPException(status_code=400, detail=f"Unsupported file type: {detected}")
 
@@ -650,11 +751,26 @@ async def create_channel(
                     uploaded_by=current_user.users_id,
                     channel_id=channel.channels_id,
                     original_filename=uf.filename or final_path.name,
-                    storage_uri=rel_path,            # << เก็บ relative
+                    storage_uri=rel_path,
                     size_bytes=size_bytes,
                 )
                 db.add(frow)
                 await db.flush()
+
+                # 5) เติมเอกสารเข้า RAG (Chroma) ทันที
+                abs_path = UPLOAD_ROOT / rel_path
+                try:
+                    docs = SimpleDirectoryReader(input_files=[str(abs_path)]).load_data()
+                    for d in docs:
+                        d.metadata = d.metadata or {}
+                        d.metadata["channel_id"] = str(channel.channels_id)
+                        d.metadata["filename"] = frow.original_filename
+
+                    # 👉 เติมเอกสารลงคอลเลกชันเดิม
+                    add_documents(docs)
+
+                except Exception as e:
+                    print(f"[RAG] failed to index {abs_path}: {e}")
 
                 resp = {
                     "files_id": frow.files_id,
@@ -669,13 +785,12 @@ async def create_channel(
         await db.refresh(channel)
 
     except Exception:
-        # ถ้า error ใดๆ ให้ลบไฟล์ที่เขียนไปแล้วออก เพื่อไม่ทิ้ง orphan
         for p in created_paths:
             try:
                 p.unlink(missing_ok=True)
             except Exception:
                 pass
-        raise  # ส่ง error ต่อให้ FastAPI จัดการ
+        raise
 
     return {
         "channel": {
@@ -688,6 +803,7 @@ async def create_channel(
     }
 
 
+
 @app.get("/channels/{channel_id}", response_model=ChannelOut)
 async def get_channel_details(channel_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
@@ -695,8 +811,12 @@ async def get_channel_details(channel_id: int, db: AsyncSession = Depends(get_db
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
     
+    is_private = channel.status == RoleChannel.private
+    is_owner = channel.created_by == current_user.users_id
+    is_admin = current_user.role == RoleUser.admin
+    
     # ตรวจสอบสิทธิ์การเข้าถึง
-    if channel.status == RoleChannel.private and channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
+    if is_private and not (is_owner or is_admin):
         raise HTTPException(status_code=403, detail="Not authorized to access this channel")
     
     # ดึงรายการไฟล์ที่อยู่ใน channel นี้
@@ -893,62 +1013,77 @@ async def list_my_channels(
         for ch, file_count in rows
     ]
     
+# --- แทนที่ฟังก์ชัน upload_files_only ทั้งก้อนด้วยเวอร์ชันนี้ ---
 @app.post("/files/upload", status_code=201)
 async def upload_files_only(
-    channel_id: int = Form(...),          
-    files: list[UploadFile] = FormFile(...),      # รับหลายไฟล์
+    channel_id: int = Form(...),
+    files: list[UploadFile] = FormFile(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # 1) ตรวจสอบว่ามี channel จริงไหม
+    # 1) ตรวจสอบว่า channel มีอยู่จริง
     res = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
     channel = res.scalar_one_or_none()
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
 
-    # 2) ตรวจสอบสิทธิ์เจ้าของ channel
+    # 2) ตรวจสิทธิ์เจ้าของ channel
     if channel.created_by != current_user.users_id:
         raise HTTPException(status_code=403, detail="Not authorized to upload to this channel")
-    
+
     # 3) จำกัดจำนวนไฟล์ต่อ request
     if len(files) > 10:
         raise HTTPException(status_code=400, detail="Too many files in one request")
-    
+
     stored_files: list[dict] = []
     created_paths: list[pathlib.Path] = []
 
     try:
         for uf in files:
-            
             final_path, rel_path = _build_storage_path(channel_id, uf.filename)
 
-            # 4) เขียนไฟล์แบบ async + atomic และตรวจขนาด
+            # 4) เขียนไฟล์ + ตรวจขนาด
             size_bytes = await _save_upload_atomic(uf, final_path, MAX_SIZE_PER_FILE)
             created_paths.append(final_path)
             await uf.close()
 
-            # 5) ตรวจ MIME จริงจากไฟล์ (ถ้ามี python-magic)
+            # 5) ตรวจ MIME
             detected_mime = sniff_mime(final_path)
             if detected_mime not in ALLOW_MIME:
                 final_path.unlink(missing_ok=True)
                 raise HTTPException(status_code=400, detail=f"Unsupported file type: {detected_mime}")
 
-            # 6) บันทึก DB โดยเก็บ 'relative path'
+            # 6) บันทึก DB
             frow = File(
                 uploaded_by=current_user.users_id,
                 channel_id=channel_id,
                 original_filename=uf.filename or final_path.name,
-                storage_uri=rel_path,         # << เก็บ relative เช่น "12/2025/10/uuid.pdf"
+                storage_uri=rel_path,
                 size_bytes=size_bytes,
             )
             db.add(frow)
             await db.flush()  # ได้ files_id
 
+            # 7) เติมเอกสารเข้า RAG (Chroma)
+            abs_path = UPLOAD_ROOT / rel_path
+            try:
+                docs = SimpleDirectoryReader(input_files=[str(abs_path)]).load_data()
+                for d in docs:
+                    d.metadata = d.metadata or {}
+                    d.metadata["channel_id"] = str(channel_id)
+                    d.metadata["filename"] = frow.original_filename
+
+                # เติมเอกสารลงคอลเลกชันเดิม
+                add_documents(docs)
+
+            except Exception as e:
+                print(f"[RAG] failed to index {abs_path}: {e}")
+
             resp = {
                 "files_id": frow.files_id,
                 "original_filename": frow.original_filename,
                 "size_bytes": size_bytes,
-                "mime": detected_mime,   # ใช้ที่ sniff ได้เอง
+                "mime": detected_mime,
                 "channel_id": channel_id,
             }
             if channel.status == RoleChannel.public:
@@ -956,7 +1091,6 @@ async def upload_files_only(
             stored_files.append(resp)
 
     except Exception:
-        # ลบไฟล์ที่เขียนไปแล้วถ้ามี error
         for p in created_paths:
             try:
                 p.unlink(missing_ok=True)
@@ -965,6 +1099,7 @@ async def upload_files_only(
         raise
 
     return {"files": stored_files}
+
 
 @app.delete("/files/delete/{file_id}", status_code=204)
 async def delete_file(
@@ -998,20 +1133,64 @@ async def delete_file(
     return
 
 @app.post("/create/session", status_code=201)
-async def create_session(session: sessionCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    chackcidinbd = await db.execute(select(Channel).where(Channel.channels_id == session.channel_id))
-    chackcidinbd = chackcidinbd.scalar_one_or_none()
-    if chackcidinbd is None:
+async def create_session(
+    payload: sessionCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 1) หา channel ก่อน
+    result = await db.execute(
+        select(Channel).where(Channel.channels_id == payload.channel_id)
+    )
+    channel = result.scalar_one_or_none()
+    if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
-    
+
+    # 2) เช็คสิทธิ์เข้า channel นี้
+    # - public: ใครก็เข้าได้
+    # - private: ต้องเป็นคนสร้าง หรือ admin
+    if channel.status == RoleChannel.private:
+        if channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
+            raise HTTPException(status_code=403, detail="Not authorized to access this channel")
+
+    # 3) (ทางเลือก) ถ้าไม่อยากให้สร้างซ้ำรัว ๆ ให้เช็คก่อนว่ามีล่าสุดแล้วหรือยัง
+    #    ถ้าอยากให้สร้างได้กี่รอบก็ได้ ข้ามบล็อกนี้ไปได้
+    # last_sess_stmt = (
+    #     select(sessions)
+    #     .where(
+    #         sessions.channel_id == payload.channel_id,
+    #         sessions.user_id == current_user.users_id,
+    #     )
+    #     .order_by(sessions.created_at.desc())
+    #     .limit(1)
+    # )
+    # last_sess_res = await db.execute(last_sess_stmt)
+    # last_sess = last_sess_res.scalar_one_or_none()
+    # if last_sess:
+    #     # ถ้าจะ reuse session เดิม ก็ return ตัวเก่าเลย
+    #     return {
+    #         "session_id": last_sess.sessions_id,
+    #         "channel_id": last_sess.channel_id,
+    #         "user_id": last_sess.user_id,
+    #         "created_at": last_sess.created_at,
+    #         "reused": True,
+    #     }
+
+    # 4) สร้าง session ใหม่
     new_session = sessions(
-        channel_id=session.channel_id,
+        channel_id=payload.channel_id,
         user_id=current_user.users_id,
     )
     db.add(new_session)
     await db.flush()
     await db.refresh(new_session)
-    return {"session_id": new_session.sessions_id}
+
+    return {
+        "session_id": new_session.sessions_id,
+        "channel_id": new_session.channel_id,
+        "user_id": new_session.user_id,
+        "created_at": new_session.created_at,
+    }
 
 @app.delete("/delete/session/{session_id}", status_code=204)
 async def delete_session(session_id: int = Path(..., gt=0), db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1026,17 +1205,142 @@ async def delete_session(session_id: int = Path(..., gt=0), db: AsyncSession = D
     await db.delete(session)
     return
 
-@app.post("/chats", status_code=201)
-async def create_chat(chat: chatCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    new_chat = chats(
-        channels_id=chat.channels_id,
+@app.post("/sessions/{session_id}/ollama-reply", status_code=201)
+async def Talking_with_Ollama_from_document(
+    session_id: int = Path(..., gt=0),
+    payload: message = Body(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 1) เช็คว่า session เป็นของ user นี้
+    sess_stmt = (
+        select(sessions)
+        .where(
+            sessions.sessions_id == session_id,
+            sessions.user_id == current_user.users_id,
+        )
+    )
+    sess_res = await db.execute(sess_stmt)
+    sess = sess_res.scalar_one_or_none()
+    if sess is None:
+        raise HTTPException(status_code=403, detail="Not your session")
+
+    # 2) เซฟข้อความ user
+    user_chat = chats(
+        channels_id=sess.channel_id,
         users_id=current_user.users_id,
-        sessions_id=chat.sessions_id,
+        sessions_id=sess.sessions_id,
+        message=payload.message,
+        sender_type=RoleSender.user,
+    )
+    db.add(user_chat)
+    await db.flush()
+    await db.refresh(user_chat)
+
+    # 3) ดึงประวัติ (จะมีหรือไม่มีก็ได้ แต่เราจะส่งให้ RAG เพื่อดึงข้อความท้าย)
+    history_stmt = (
+        select(chats)
+        .where(chats.sessions_id == sess.sessions_id)
+        .order_by(chats.created_at.asc())
+        .limit(5)
+    )
+    history_res = await db.execute(history_stmt)
+    history_rows = history_res.scalars().all()
+
+    ai_messages = []
+    for row in history_rows:
+        if row.sender_type == RoleSender.user:
+            ai_messages.append({"role": "user", "content": row.message})
+        else:
+            ai_messages.append({"role": "assistant", "content": row.message})
+
+    # 4) เรียก RAG
+    ai_text = await call_ai(ai_messages , sess.channel_id)
+
+    # 5) เซฟคำตอบ AI
+    ai_chat = chats(
+        channels_id=sess.channel_id,
+        users_id=current_user.users_id,
+        sessions_id=sess.sessions_id,
+        message=ai_text,
+        sender_type=RoleSender.AI,
+    )
+    db.add(ai_chat)
+    await db.flush()
+    await db.refresh(ai_chat)
+
+    # 6) ส่งกลับ
+    return {
+        "user_message": {
+            "chat_id": user_chat.chat_id,
+            "message": user_chat.message,
+            "sender_type": user_chat.sender_type,
+            "created_at": user_chat.created_at,
+        },
+        "ai_message": {
+            "chat_id": ai_chat.chat_id,
+            "message": ai_chat.message,
+            "sender_type": ai_chat.sender_type,
+            "created_at": ai_chat.created_at,
+        },
+    }
+
+@app.get("/sessions/{session_id}/history", response_model=List[chatHistoryItem])
+async def get_chat_history(session_id: int = Path(..., gt=0), db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # 1) ตรวจว่า session นี้เป็นของ user นี้จริงไหม
+    owned_sess = await get_owned_session(db, session_id, current_user.users_id)
+    if owned_sess is None:
+        # ไม่ใช่ของเขา หรือไม่มีอยู่
+        raise HTTPException(status_code=403, detail="Not your session")
+
+    # 2) ดึงประวัติ chat ทั้งหมดใน session นี้
+    result = await db.execute(
+        select(chats)
+        .where(chats.sessions_id == session_id)
+        .order_by(chats.created_at.asc())
+    )
+    chat_rows = result.scalars().all()
+
+    history = []
+    for row in chat_rows:
+        history.append(chatHistoryItem(
+            chat_id=row.chat_id,
+            channels_id=row.channels_id,
+            users_id=row.users_id,
+            sessions_id=row.sessions_id,
+            message=row.message,
+            sender_type=row.sender_type,
+            created_at=row.created_at,
+        ))
+
+    return history
+
+@app.post("/chats", status_code=201)
+async def create_chat(chat: message, session_id: int = Query(..., gt=0), db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # 1) ตรวจว่า session นี้เป็นของ user นี้จริงไหม
+    owned_sess = await get_owned_session(db, session_id, current_user.users_id)
+    if owned_sess is None:
+        # ไม่ใช่ของเขา หรือไม่มีอยู่
+        raise HTTPException(status_code=403, detail="Not your session")
+
+    # 2) ตอนนี้เรารู้แล้วว่า session นี้ของ user นี้ และรู้ด้วยว่าอยู่ channel ไหน
+    #    owned_sess.channel_id คือ channel ที่ session นี้อยู่
+    new_chat = chats(
+        channels_id=owned_sess.channel_id,
+        users_id=current_user.users_id,
+        sessions_id=owned_sess.sessions_id,
         message=chat.message,
-        sender_type=chat.sender_type,
+        sender_type=RoleSender.user,   # หรือจะให้ client ส่งมาก็ได้ แต่ควร validate
     )
     db.add(new_chat)
     await db.flush()
     await db.refresh(new_chat)
-    return {"chat_id": new_chat.chats_id}
+
+    return {
+        "chat_id": new_chat.chat_id,
+        "channel_id": new_chat.channels_id,
+        "session_id": new_chat.sessions_id,
+        "message": new_chat.message,
+        "created_at": new_chat.created_at,
+    }
 
