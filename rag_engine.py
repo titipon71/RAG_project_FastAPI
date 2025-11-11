@@ -28,7 +28,6 @@ os.makedirs(CHROMA_DIR, exist_ok=True)
 try:
     documents = SimpleDirectoryReader(DATA_DIR).load_data()
 except ValueError:
-    # กรณี uploads/ ว่าง ให้เริ่มด้วย list ว่างไปเลย
     documents = []
 
 

@@ -13,7 +13,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel , EmailStr
 from pydantic_settings import BaseSettings
-from sqlalchemy import String, func, select ,Enum as SAEnum, ForeignKey, text
+from sqlalchemy import String, desc, func, select ,Enum as SAEnum, ForeignKey, text
 from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
@@ -66,10 +66,16 @@ class RoleUser(str, enum.Enum):
 class RoleChannel(str, enum.Enum):
     public = "public"
     private = "private"
+    pending = "pending"
 
 class RoleSender(str, enum.Enum):
     user = "user"
     AI = "AI"
+    
+class ModerationDecision(str, enum.Enum):
+    approved = "approved"
+    rejected = "rejected"
+    
 class Channel(Base):
     __tablename__ = "channels"
 
@@ -202,6 +208,86 @@ class chats(Base):
     sender_type: Mapped[RoleSender] = mapped_column("sender_type", MyEnum(RoleSender), nullable=False ,)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
+
+class ChannelStatusEvent(Base):
+    __tablename__ = "channel_status_events"
+
+    event_id: Mapped[int] = mapped_column(
+        "event_id",
+        MyInt(unsigned=True),
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    channel_id: Mapped[int] = mapped_column(
+        "channel_id",
+        MyInt(unsigned=True),
+        ForeignKey(
+            "channels.channels_id",
+            ondelete="CASCADE",   
+            onupdate="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+    )
+
+    old_status: Mapped[RoleChannel] = mapped_column(
+        "old_status",
+        SAEnum(RoleChannel),
+        nullable=False,
+    )
+    new_status: Mapped[RoleChannel] = mapped_column(
+        "new_status",
+        SAEnum(RoleChannel),
+        nullable=False,
+    )
+
+    requested_by: Mapped[int] = mapped_column(
+        "requested_by",
+        MyInt(unsigned=True),
+        ForeignKey(
+            "users.users_id",
+            ondelete="SET NULL",
+            onupdate="CASCADE",
+        ),
+        nullable=True,
+    )
+
+    decided_by: Mapped[Optional[int]] = mapped_column(
+        "decided_by",
+        MyInt(unsigned=True),
+        ForeignKey(
+            "users.users_id",
+            ondelete="SET NULL",
+            onupdate="CASCADE",
+        ),
+        nullable=True,
+    )
+
+    decision: Mapped[Optional[ModerationDecision]] = mapped_column(
+        "decision",
+        SAEnum(ModerationDecision),
+        nullable=True,
+    )
+
+    decision_reason: Mapped[Optional[str]] = mapped_column(
+        "decision_reason",
+        String(1000),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        "created_at",
+        server_default=func.current_timestamp(),
+        nullable=False,
+    )
+    decided_at: Mapped[Optional[datetime]] = mapped_column(
+        "decided_at",
+        nullable=True,
+    )
+
+
+    
 engine = create_async_engine(
     settings.database_url,
     echo=False,
@@ -340,6 +426,19 @@ def get_rag_index():
     from rag_engine import index
     return index    
 
+async def get_latest_pending_event( db: AsyncSession, channel_id: int) -> Optional[ChannelStatusEvent]:
+    stmt = (
+        select(ChannelStatusEvent)
+        .where(ChannelStatusEvent.channel_id == channel_id,
+               ChannelStatusEvent.decision.is_(None),
+               ChannelStatusEvent.new_status == RoleChannel.public
+               )
+        .order_by(desc(ChannelStatusEvent.created_at))
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
 # ---------- ตัวช่วยเซฟไฟล์แบบ async ----------
 async def _save_upload_to_disk(uf: UploadFile, dst_path: pathlib.Path, max_size: int) -> int:
     """บันทึก UploadFile ลงดิสก์แบบ async และคืนค่า size (bytes)"""
@@ -445,6 +544,26 @@ class chatHistoryItem(BaseModel):
     created_at: datetime
 
 class message(BaseModel):
+    message: str
+
+class ModerationResponse(BaseModel):
+    channel_id: int
+    old_status: RoleChannel
+    current_status: RoleChannel
+    event_id: int
+    message: str
+    
+class AdminDecisionIn(BaseModel):
+    approve: bool
+    reason: Optional[str] = None
+
+class AdminDecisionOut(BaseModel):
+    channels_id: int
+    decision: ModerationDecision
+    status_after: RoleChannel
+    event_id: int
+    decided_by: int
+    decided_at: datetime
     message: str
 # ---------- App ----------
 
@@ -660,7 +779,6 @@ async def get_user_by_token(current_user: User = Depends(get_current_user)):
 
 # --- CRUD Channel & File ---
 
-
 # ตรวจไฟล์ (optional)
 MAX_SIZE_PER_FILE = 50 * 1024 * 1024  # 50 MB
 ALLOW_MIME = {"application/pdf",
@@ -702,7 +820,6 @@ async def _save_upload_atomic(uf: UploadFile, final_path: pathlib.Path, max_size
     os.replace(tmp_path, final_path)
     return size_bytes
 
-# --- แทนที่ฟังก์ชัน create_channel ทั้งก้อนด้วยเวอร์ชันนี้ ---
 @app.post("/channels", status_code=201)
 async def create_channel(
     title: str = Form(...),
@@ -811,12 +928,12 @@ async def get_channel_details(channel_id: int, db: AsyncSession = Depends(get_db
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
     
-    is_private = channel.status == RoleChannel.private
+    is_private_like = channel.status in (RoleChannel.private , RoleChannel.pending)
     is_owner = channel.created_by == current_user.users_id
     is_admin = current_user.role == RoleUser.admin
-    
+        
     # ตรวจสอบสิทธิ์การเข้าถึง
-    if is_private and not (is_owner or is_admin):
+    if is_private_like and not (is_owner or is_admin):
         raise HTTPException(status_code=403, detail="Not authorized to access this channel")
     
     # ดึงรายการไฟล์ที่อยู่ใน channel นี้
@@ -906,6 +1023,104 @@ async def update_channel(
         status=channel.status,
         created_at=channel.created_at,
         file_count=file_count,
+    )
+
+@app.post("/channels/{channel_id}/request-public", response_model=ModerationResponse, status_code=201)
+async def request_make_public(
+    channel_id: int,
+    reason: Optional[str] = Body(None, embed=True),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 1) โหลด channel
+    res = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    channel = res.scalar_one_or_none()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    # 2) ต้องเป็นเจ้าของเท่านั้น
+    if channel.created_by != current_user.users_id:
+        raise HTTPException(status_code=403, detail="Only owner can request")
+
+    # 3) ยื่นคำขอได้เฉพาะเมื่อสถานะเป็น private เท่านั้น
+    if channel.status == RoleChannel.public:
+        raise HTTPException(status_code=400, detail="Channel already public")
+    if channel.status == RoleChannel.pending:
+        raise HTTPException(status_code=409, detail="Channel already pending approval")
+
+    old_status = channel.status
+    channel.status = RoleChannel.pending
+
+    # 4) สร้าง event
+    event = ChannelStatusEvent(
+        channel_id=channel.channels_id,
+        old_status=old_status,
+        new_status=RoleChannel.public,
+        requested_by=current_user.users_id,
+        decision=None,
+    )
+    db.add(event)
+    await db.flush()
+    await db.refresh(channel)
+    await db.refresh(event)
+
+    return ModerationResponse(
+        channel_id=channel.channels_id,
+        old_status=old_status,
+        current_status=channel.status,
+        event_id=event.event_id,
+        message="Request submitted. Waiting for admin approval."
+    )
+
+@app.post("/channels/{channel_id}/moderate-public", response_model=AdminDecisionOut)
+async def moderate_public_request(
+    channel_id: int,
+    payload: AdminDecisionIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    
+    res = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    channel = res.scalar_one_or_none()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    if channel.status != RoleChannel.pending:
+        raise HTTPException(status_code=400, detail="Channel is not pending")
+
+    event_table = await get_latest_pending_event(db, channel_id)
+    if not event_table:
+        raise HTTPException(status_code=404, detail="No pending request event found")
+    now =  datetime.now(timezone.utc)
+    
+    reason = payload.reason
+    if payload.approve:
+        final_message = reason or "Approved — channel is now PUBLIC."
+        channel.status = RoleChannel.public
+        event_table.decision = ModerationDecision.approved
+    else:
+        final_message = reason or "Rejected — channel remains PRIVATE."
+        channel.status = RoleChannel.private
+        event_table.decision = ModerationDecision.rejected
+
+    event_table.decided_by = current_user.users_id
+    event_table.decided_at = now
+    event_table.decision_reason = reason
+
+    await db.flush()
+    await db.refresh(channel)
+    await db.refresh(event_table)
+
+    return AdminDecisionOut(
+        channels_id=channel.channels_id,
+        decision=event_table.decision,
+        status_after=channel.status,
+        event_id=event_table.event_id,
+        decided_by=event_table.decided_by,
+        decided_at=event_table.decided_at,
+        message=final_message,
     )
 
 @app.put("/channels/status/{channel_id}", response_model=ChannelUpdateStatus)
@@ -1149,7 +1364,7 @@ async def create_session(
     # 2) เช็คสิทธิ์เข้า channel นี้
     # - public: ใครก็เข้าได้
     # - private: ต้องเป็นคนสร้าง หรือ admin
-    if channel.status == RoleChannel.private:
+    if channel.status in (RoleChannel.private, RoleChannel.pending):
         if channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
             raise HTTPException(status_code=403, detail="Not authorized to access this channel")
 
