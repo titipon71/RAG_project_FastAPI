@@ -40,14 +40,12 @@ from rag_engine import add_documents, rag_query, rag_query_with_channel
 # from fastapi_limiter.depends import RateLimiter
 # from fastapi.responses import JSONResponse
 
-API_KEY = os.getenv("API_KEY")
 # ---------- Settings ----------
 class Settings(BaseSettings):
     database_url: str
     secret_key: str = "dev-secret"
     access_token_expire_minutes: int = 720
     upload_root: pathlib.Path = pathlib.Path("./uploads")
-    api_key: str = API_KEY
     class Config:
         env_file = ".env"
 
@@ -511,7 +509,15 @@ class ChannelListItem(BaseModel):
     status: RoleChannel
     created_at: datetime
     file_count: int
-    
+
+class ChannelListPendingItem(BaseModel):
+    channels_id: int
+    title: str
+    description: Optional[str] = None
+    status: RoleChannel
+    created_at: datetime
+    files: List[dict]
+
 class ChannelListPublicItem(BaseModel):
     channels_id: int
     title: str
@@ -1028,7 +1034,6 @@ async def update_channel(
 @app.post("/channels/{channel_id}/request-public", response_model=ModerationResponse, status_code=201)
 async def request_make_public(
     channel_id: int,
-    reason: Optional[str] = Body(None, embed=True),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1122,6 +1127,51 @@ async def moderate_public_request(
         decided_at=event_table.decided_at,
         message=final_message,
     )
+
+@app.get("/channels/pending/list/", response_model=List[ChannelListPendingItem])
+async def list_pending_channels(
+    search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
+    skip: int = 0,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = (
+        select(Channel)
+        .where(Channel.status == RoleChannel.pending)
+        .order_by(Channel.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    if search_by_name:
+        stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
+
+    result = await db.execute(stmt)
+    channels = result.scalars().all()
+
+    channel_list = []
+    for ch in channels:
+        # ดึงรายการไฟล์ในแต่ละ channel
+        file_result = await db.execute(select(File).where(File.channel_id == ch.channels_id))
+        files = file_result.scalars().all()
+        file_list = [
+            {
+                "files_id": f.files_id,
+                "original_filename": f.original_filename,
+                "storage_uri": f.storage_uri,
+                "size_bytes": f.size_bytes,
+                "created_at": f.created_at,
+            }
+            for f in files
+        ]
+        channel_list.append(ChannelListPublicItem(
+            channels_id=ch.channels_id,
+            title=ch.title,
+            description=ch.description,
+            status=ch.status,
+            created_at=ch.created_at,
+            files=file_list,
+        ))
+    return channel_list
 
 @app.put("/channels/status/{channel_id}", response_model=ChannelUpdateStatus)
 async def update_channel_status(
