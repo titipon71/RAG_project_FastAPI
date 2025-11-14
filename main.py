@@ -43,7 +43,7 @@ from rag_engine import add_documents, rag_query, rag_query_with_channel
 # ---------- Settings ----------
 class Settings(BaseSettings):
     database_url: str
-    secret_key: str = "dev-secret"
+    secret_key: str = os.getenv("SECRET_KEY")
     access_token_expire_minutes: int = 720
     upload_root: pathlib.Path = pathlib.Path("./uploads")
     class Config:
@@ -69,6 +69,10 @@ class RoleChannel(str, enum.Enum):
 class RoleSender(str, enum.Enum):
     user = "user"
     AI = "AI"
+
+class Theme(str, enum.Enum):
+    light = "light"
+    dark = "dark"
     
 class ModerationDecision(str, enum.Enum):
     approved = "approved"
@@ -80,7 +84,7 @@ class Channel(Base):
     # PK: INT(10) UNSIGNED AUTO_INCREMENT
     channels_id: Mapped[int] = mapped_column(
         "channels_id",
-        MyInt(unsigned=True),              # ตรงกับ UNSIGNED
+        MyInt(unsigned=True),              
         primary_key=True,
         autoincrement=True,
     )
@@ -166,12 +170,18 @@ class User(Base):
     # role: ENUM('user','admin') DEFAULT 'user'
     role: Mapped[RoleUser] = mapped_column(
         "role",
-        MyEnum(RoleUser),                       # ผูกกับ enum ของ MySQL
+        MyEnum(RoleUser),                       
         nullable=False,
-        server_default=text("'user'"),      # ให้ default ฝั่ง DB ตรงกับสคีมา
+        server_default=text("'user'"),     
+    )
+    
+    theme: Mapped[Theme] = mapped_column(
+        "theme",
+        MyEnum(Theme),
+        nullable=False,
+        server_default=text("'light'"),
     )
 
-    # created_at: TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     created_at: Mapped[datetime] = mapped_column(
         "created_at",
         # ปล่อยให้ DB ใส่ค่าให้เองตาม default
@@ -524,8 +534,15 @@ class ChannelListPublicItem(BaseModel):
     description: Optional[str] = None
     status: RoleChannel
     created_at: datetime
-    files: List[dict]  # รายการไฟล์ใน channel นี้
-    
+    files: List[dict] 
+
+class ChannelListAllItem(BaseModel):
+    channels_id: int
+    title: str
+    description: Optional[str] = None
+    status: RoleChannel
+    created_at: datetime
+    files: List[dict] 
 class ChannelUpdateStatus(BaseModel):
     channels_id: int
     status: RoleChannel
@@ -1277,8 +1294,58 @@ async def list_my_channels(
         )
         for ch, file_count in rows
     ]
-    
-# --- แทนที่ฟังก์ชัน upload_files_only ทั้งก้อนด้วยเวอร์ชันนี้ ---
+
+@app.get("/channels/list/all/", response_model=List[ChannelListAllItem])
+async def list_all_channels(
+    search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
+    skip: int = 0,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    stmt = (
+        select(Channel)
+        .outerjoin(File, File.channel_id == Channel.channels_id)
+        .group_by(Channel.channels_id)
+        .order_by(Channel.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    if search_by_name:
+        stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
+
+    result = await db.execute(stmt)
+    channel = result.scalars().all()
+
+    channel_list_file = []
+    for ch in channel:
+        # ดึงรายการไฟล์ในแต่ละ channel
+        file_result = await db.execute(select(File).where(File.channel_id == ch.channels_id))
+        files = file_result.scalars().all()
+        file_list = [
+            {
+                "files_id": f.files_id,
+                "original_filename": f.original_filename,
+                "storage_uri": f.storage_uri,
+                "size_bytes": f.size_bytes,
+                "created_at": f.created_at,
+            }
+            for f in files
+        ]
+        channel_list_file.append(ChannelListAllItem(
+            channels_id=ch.channels_id,
+            title=ch.title,
+            description=ch.description,
+            status=ch.status,
+            created_at=ch.created_at,
+            files=file_list,
+        ))
+    return channel_list_file
+
+
 @app.post("/files/upload", status_code=201)
 async def upload_files_only(
     channel_id: int = Form(...),
@@ -1502,7 +1569,7 @@ async def Talking_with_Ollama_from_document(
     await db.flush()
     await db.refresh(user_chat)
 
-    # 3) ดึงประวัติ (จะมีหรือไม่มีก็ได้ แต่เราจะส่งให้ RAG เพื่อดึงข้อความท้าย)
+    # 3) ดึงประวัติ 
     history_stmt = (
         select(chats)
         .where(chats.sessions_id == sess.sessions_id)

@@ -38,7 +38,7 @@ for d in documents:
 # 2) embedder
 embed_model = HuggingFaceEmbedding(
     model_name=EMBED_MODEL,
-    device="cuda",        # ถ้าเครื่องไม่มี GPU ให้เปลี่ยนเป็น "cpu"
+    device="cuda",        
     trust_remote_code=True
 )
 
