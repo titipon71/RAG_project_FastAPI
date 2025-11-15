@@ -7,6 +7,7 @@ from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, StorageCon
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
+from llama_index.core.node_parser import SemanticSplitterNodeParser
 
 
 import chromadb
@@ -19,10 +20,13 @@ DATA_DIR = os.getenv("RAG_DATA_DIR", "uploads")
 CHROMA_DIR = os.getenv("CHROMA_DIR", "./chroma_db")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:0.6b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "scb10x/llama3.2-typhoon2-1b-instruct:latest")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(CHROMA_DIR, exist_ok=True)
+
+
+
 
 # 1) โหลดเอกสาร
 try:
@@ -42,11 +46,19 @@ embed_model = HuggingFaceEmbedding(
     trust_remote_code=True
 )
 
+# 2.1) Semantic splitter (chunk แบบ semantic)
+node_parser = SemanticSplitterNodeParser.from_defaults(
+    embed_model=embed_model,
+    breakpoint_percentile_threshold=95, 
+    # หรือถ้าอยาก fix ขนาด chunk ก็ใช้ chunk_size=512 แทนได้
+)
+
 SAFETY_SYSTEM_PROMPT = (
     "คุณคือผู้ช่วยอัจฉริยะที่ตอบคำถามเป็นภาษาไทยอย่างสุภาพและชัดเจน "
     "โปรดตอบเฉพาะคำตอบสุดท้ายเท่านั้น ห้ามแสดงขั้นตอนการคิด "
     "ห้ามใส่ข้อความในแท็ก <think>...</think> "
-    "หากไม่แน่ใจ ให้ตอบอย่างกระชับว่าไม่แน่ใจ อย่าคิดเสียงดังหรืออธิบายกระบวนการคิดของคุณ."
+    "อย่าคิดเสียงดังหรืออธิบายกระบวนการคิดของคุณ."
+    "เอาความรู้มาจากเอกสารที่มี ถ้าไม่มีในเอกสารให้บอกว่า 'ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่มีอยู่ 😔' "
 )
 
 # 3) LLM = Ollama local
@@ -80,15 +92,21 @@ except:
 vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
-# 5) สร้าง index
+# 5) สร้าง index ด้วย semantic chunks
+if documents:
+    nodes = node_parser.get_nodes_from_documents(documents)
+else:
+    nodes = []
+
 index = VectorStoreIndex.from_documents(
-    documents,
+    nodes,
     embed_model=embed_model,
     storage_context=storage_context,
 )
 
 # 6) query engine
 query_engine = index.as_query_engine(llm=llm)
+
 
 def _strip_think(text: str) -> str:
     if not text:
@@ -98,16 +116,36 @@ def _strip_think(text: str) -> str:
     return text.strip()
 
 def add_documents(docs):
-    """เติมเอกสารใหม่เข้า vector store เดิม"""
     for d in docs:
         d.metadata = d.metadata or {}
-    # เทคนิค: สร้าง Index ใหม่จาก docs เหล่านี้ โดยใช้ storage_context เดิม
+    # แปลง documents เป็น semantic chunks ก่อน
+    nodes = node_parser.get_nodes_from_documents(docs)
+
+    # เทคนิค: สร้าง Index ใหม่จาก nodes เหล่านี้ โดยใช้ storage_context เดิม
     # LlamaIndex จะฝัง (embed) แล้วเขียนลงคอลเลกชันเดิมให้
     VectorStoreIndex.from_documents(
-        docs,
+        nodes,
         embed_model=embed_model,
         storage_context=storage_context,
     )
+
+
+def delete_documents_by_metadata(metadata: dict):
+    where = {k: str(v) for k, v in metadata.items()}
+    chroma_collection.delete(where=where)
+
+def delete_documents_by_file_id(files_id: int | str):
+    where = {"files_id": str(files_id)}
+    print("[RAG] delete by file_id where =", where)
+    chroma_collection.delete(where=where)
+    
+
+def debug_list_docs_by_channel(channel_id: int):
+    res = chroma_collection.get(where={"channel_id": str(channel_id)})
+    print("[DEBUG] chroma docs for channel", channel_id)
+    print("ids:", res.get("ids"))
+    print("metadatas:", res.get("metadatas"))
+
 
 def rag_query(question: str) -> str:
     resp = query_engine.query(question)
@@ -121,12 +159,10 @@ def rag_query_with_channel(question: str, channel_id: int) -> str:
     nodes = retriever.retrieve(question)
 
     if not nodes:
-        return "ตอนนี้ยังไม่มีไฟล์ในช่องนี้ที่ผมใช้ตอบได้เลยนะ"
+        return "ตอนนี้ยังไม่มีเอกสารที่ใช้ตอบได้เลยนะ🤔 รบกวนเพิ่มเอกสารก่อนนะคะ😊"
 
-    # สร้าง list ชื่อไฟล์จาก metadata ถ้ามี
     file_names = []
     for n in nodes:
-        # ถ้าตอน insert อยากเก็บชื่อไฟล์ด้วยก็เก็บเลย
         if "filename" in n.metadata:
             file_names.append(n.metadata["filename"])
 
@@ -138,6 +174,6 @@ def rag_query_with_channel(question: str, channel_id: int) -> str:
     answer = _strip_think(str(resp))
     
     if file_names:
-        return f"{answer} (อ้างอิงจากไฟล์: {', '.join(set(file_names))})"
+        print(f"[RAG] files used: {set(file_names)}")
+        return f"{answer}"
     return answer
-

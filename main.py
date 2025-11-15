@@ -31,7 +31,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
-from rag_engine import add_documents, rag_query, rag_query_with_channel
+from rag_engine import add_documents, debug_list_docs_by_channel, delete_documents_by_file_id, delete_documents_by_metadata, rag_query, rag_query_with_channel
 
 # import fastapi
 # import asyncio
@@ -81,7 +81,6 @@ class ModerationDecision(str, enum.Enum):
 class Channel(Base):
     __tablename__ = "channels"
 
-    # PK: INT(10) UNSIGNED AUTO_INCREMENT
     channels_id: Mapped[int] = mapped_column(
         "channels_id",
         MyInt(unsigned=True),              
@@ -89,7 +88,6 @@ class Channel(Base):
         autoincrement=True,
     )
 
-    # title: NOT NULL
     title: Mapped[str] = mapped_column(
         "title",
         String(255),
@@ -105,10 +103,10 @@ class Channel(Base):
     # status: ENUM('public','private') DEFAULT 'private'
     status: Mapped[RoleChannel] = mapped_column(
         "status",
-        SAEnum(RoleChannel),                       # ผูกกับ enum ของ MySQL
+        SAEnum(RoleChannel),                       
         nullable=False,
         default=RoleChannel.private,
-        server_default=text("'private'"),      # ให้ default ฝั่ง DB ตรงกับสคีมา
+        server_default=text("'private'"),      
     )
 
     created_by: Mapped[int] = mapped_column(
@@ -121,10 +119,10 @@ class Channel(Base):
     
     created_at: Mapped[datetime] = mapped_column(
         "created_at",
-        # ปล่อยให้ DB ใส่ค่าให้เองตาม default
         server_default=func.current_timestamp(),
         nullable=False,
     )
+    
     
 class User(Base):
     __tablename__ = "users"
@@ -188,6 +186,7 @@ class User(Base):
         server_default=func.current_timestamp(),
         nullable=False,
     )
+    
 
 class File(Base):
     __tablename__ = "files"
@@ -422,7 +421,6 @@ async def call_ai(messages: List[dict], channel_id: int) -> str:
 
     # LlamaIndex เป็น sync → offload ไป thread จะปลอดภัยกว่า
     loop = asyncio.get_running_loop()
-    # rag_query_with_channel_func = get_rag_query_with_channel()
     answer = await loop.run_in_executor(None, rag_query_with_channel, last_user_msg, channel_id)
     return answer
 
@@ -541,6 +539,7 @@ class ChannelListAllItem(BaseModel):
     title: str
     description: Optional[str] = None
     status: RoleChannel
+    created_by: int
     created_at: datetime
     files: List[dict] 
 class ChannelUpdateStatus(BaseModel):
@@ -905,8 +904,9 @@ async def create_channel(
                         d.metadata = d.metadata or {}
                         d.metadata["channel_id"] = str(channel.channels_id)
                         d.metadata["filename"] = frow.original_filename
-
-                    # 👉 เติมเอกสารลงคอลเลกชันเดิม
+                        d.metadata["files_id"] = str(frow.files_id)
+                    
+                    # เติมเอกสารลงคอลเลกชันเดิม
                     add_documents(docs)
 
                 except Exception as e:
@@ -1003,9 +1003,17 @@ async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db),cur
             detail="Not authorized to delete this channel"
         ) 
     
+    flie_row = await db.execute(select(File).where(File.channel_id == channel.channels_id)).scalars().all()
+    # ลบเอกสารใน RAG (Chroma) ทั้งหมดที่เกี่ยวข้องกับไฟล์ใน channel นี้
+    for file in flie_row:            
+        try:
+            # ลบเอกสารใน RAG (Chroma)
+            delete_documents_by_file_id(file.files_id)
+        except Exception as e:
+            print(f"[RAG] failed to delete documents for file_id {file.files_id}: {e}")
+    
     # ลบไฟล์ในช่องทั้ง DB + ดิสก์
-    file_rows = (await db.execute(select(File).where(File.channel_id == channel.channels_id))).scalars().all()
-    for fr in file_rows:
+    for fr in flie_row:
         try:
             (UPLOAD_ROOT / fr.storage_uri).unlink(missing_ok=True)
         except Exception:
@@ -1145,6 +1153,7 @@ async def moderate_public_request(
         message=final_message,
     )
 
+
 @app.get("/channels/pending/list/", response_model=List[ChannelListPendingItem])
 async def list_pending_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
@@ -1203,7 +1212,7 @@ async def update_channel_status(
         raise HTTPException(status_code=404, detail="Channel not found")
     # เฉพาะ admin เท่านั้นที่แก้ไขได้
     if current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="Not authorized to edit this channel")
+        raise HTTPException(status_code=403, detail="Admin only")
     
     channel.status = new_status
     await db.flush()
@@ -1309,6 +1318,7 @@ async def list_all_channels(
     stmt = (
         select(Channel)
         .outerjoin(File, File.channel_id == Channel.channels_id)
+        .join(User, User.users_id == Channel.created_by)
         .group_by(Channel.channels_id)
         .order_by(Channel.created_at.desc())
         .offset(skip)
@@ -1340,6 +1350,7 @@ async def list_all_channels(
             title=ch.title,
             description=ch.description,
             status=ch.status,
+            created_by=ch.created_by,
             created_at=ch.created_at,
             files=file_list,
         ))
@@ -1404,6 +1415,7 @@ async def upload_files_only(
                     d.metadata = d.metadata or {}
                     d.metadata["channel_id"] = str(channel_id)
                     d.metadata["filename"] = frow.original_filename
+                    d.metadata["files_id"] = str(frow.files_id)
 
                 # เติมเอกสารลงคอลเลกชันเดิม
                 add_documents(docs)
@@ -1453,15 +1465,29 @@ async def delete_file(
         if channel is None or channel.created_by != current_user.users_id:
             raise HTTPException(status_code=403, detail="Not authorized to delete this file")
 
-    # ลบไฟล์จริงออกจากดิสก์
     try:
-        p = UPLOAD_ROOT / file.storage_uri
-        p.unlink(missing_ok=True)
-    except Exception:
-        pass  # ถ้าไฟล์หายไปแล้วก็ไม่เป็นไร
+        src = UPLOAD_ROOT / file.storage_uri
+        trash_folder = Path("D:/ECT/Project/FastAPITest/trash")
+        trash_folder.mkdir(parents=True, exist_ok=True)
+
+        # ตั้งชื่อใหม่กันชนกับไฟล์ใน trash ที่มีอยู่
+        filename = src.name
+        dst = trash_folder / f"{file.channel_id}_{file.files_id}_{filename}"
+
+        if src.exists():
+            src.rename(dst)
+
+    except Exception as e:
+        print(f"[FILE] failed to move file to trash: {e}")
 
     # ลบเรคคอร์ดใน DB
     await db.delete(file)
+    
+    # ลบเอกสารออกจาก RAG (Chroma)
+    try:
+        delete_documents_by_file_id(file.files_id)
+    except Exception as e:
+        print(f"[RAG] failed to delete documents for file_id {file_id}: {e}")
     return
 
 @app.post("/create/session", status_code=201)
@@ -1569,25 +1595,13 @@ async def Talking_with_Ollama_from_document(
     await db.flush()
     await db.refresh(user_chat)
 
-    # 3) ดึงประวัติ 
-    history_stmt = (
-        select(chats)
-        .where(chats.sessions_id == sess.sessions_id)
-        .order_by(chats.created_at.asc())
-        .limit(5)
-    )
-    history_res = await db.execute(history_stmt)
-    history_rows = history_res.scalars().all()
+    # ⚡️ 3) ส่งเฉพาะข้อความล่าสุดไปยัง AI
+    ai_messages = [
+        {"role": "user", "content": payload.message}
+    ]
 
-    ai_messages = []
-    for row in history_rows:
-        if row.sender_type == RoleSender.user:
-            ai_messages.append({"role": "user", "content": row.message})
-        else:
-            ai_messages.append({"role": "assistant", "content": row.message})
-
-    # 4) เรียก RAG
-    ai_text = await call_ai(ai_messages , sess.channel_id)
+    # 4) เรียก RAG / AI
+    ai_text = await call_ai(ai_messages, sess.channel_id)
 
     # 5) เซฟคำตอบ AI
     ai_chat = chats(
@@ -1616,6 +1630,7 @@ async def Talking_with_Ollama_from_document(
             "created_at": ai_chat.created_at,
         },
     }
+
 
 @app.get("/sessions/{session_id}/history", response_model=List[chatHistoryItem])
 async def get_chat_history(session_id: int = Path(..., gt=0), db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1675,4 +1690,9 @@ async def create_chat(chat: message, session_id: int = Query(..., gt=0), db: Asy
         "message": new_chat.message,
         "created_at": new_chat.created_at,
     }
+    
+@app.post("/debug")
+def debug_endpoint():
+    debug_list_docs_by_channel(channel_id=6)
+    return {"message": "Debug payload received"}
 
