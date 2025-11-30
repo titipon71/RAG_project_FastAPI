@@ -1,4 +1,6 @@
-# main.py
+# ============================================================
+#                      IMPORTS
+# ============================================================
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
@@ -40,7 +42,10 @@ from rag_engine import add_documents, debug_list_docs_by_channel, delete_documen
 # from fastapi_limiter.depends import RateLimiter
 # from fastapi.responses import JSONResponse
 
-# ---------- Settings ----------
+
+# ============================================================
+#                      SETTINGS / CONFIG
+# ============================================================
 class Settings(BaseSettings):
     database_url: str
     secret_key: str = os.getenv("SECRET_KEY")
@@ -52,8 +57,9 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
-
-# ---------- DB Setup ----------
+# ============================================================
+#                  DB BASE & ENUMS (SQLAlchemy)
+# ============================================================
 class Base(DeclarativeBase):
     pass
 
@@ -77,7 +83,11 @@ class Theme(str, enum.Enum):
 class ModerationDecision(str, enum.Enum):
     approved = "approved"
     rejected = "rejected"
-    
+
+
+# ============================================================
+#                      ORM MODELS (SQLAlchemy)
+# ============================================================
 class Channel(Base):
     __tablename__ = "channels"
 
@@ -130,7 +140,7 @@ class User(Base):
     # PK: INT(10) UNSIGNED AUTO_INCREMENT
     users_id: Mapped[int] = mapped_column(
         "users_id",
-        MyInt(unsigned=True),              # ตรงกับ UNSIGNED
+        MyInt(unsigned=True),              
         primary_key=True,
         autoincrement=True,
     )
@@ -182,12 +192,10 @@ class User(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         "created_at",
-        # ปล่อยให้ DB ใส่ค่าให้เองตาม default
         server_default=func.current_timestamp(),
         nullable=False,
     )
     
-
 class File(Base):
     __tablename__ = "files"
     files_id: Mapped[int] = mapped_column("files_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
@@ -294,7 +302,9 @@ class ChannelStatusEvent(Base):
     )
 
 
-    
+# ============================================================
+#                      DB ENGINE & SESSION
+# ============================================================
 engine = create_async_engine(
     settings.database_url,
     echo=False,
@@ -309,7 +319,10 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         async with session.begin():
             yield session
 
-# ---------- Security / JWT ----------
+
+# ============================================================
+#                      SECURITY / JWT
+# ============================================================
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 ALGORITHM = "HS256"
 
@@ -403,6 +416,9 @@ async def get_owned_session(
     return res.scalar_one_or_none()
 
 
+# ============================================================
+#                      RAG / AI HELPERS
+# ============================================================
 def get_rag_query_with_channel():
     from rag_engine import rag_query_with_channel
     return rag_query_with_channel
@@ -445,6 +461,10 @@ async def get_latest_pending_event( db: AsyncSession, channel_id: int) -> Option
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
+
+# ============================================================
+#              FILE SAVE / UPLOAD UTILITIES
+# ============================================================
 # ---------- ตัวช่วยเซฟไฟล์แบบ async ----------
 async def _save_upload_to_disk(uf: UploadFile, dst_path: pathlib.Path, max_size: int) -> int:
     """บันทึก UploadFile ลงดิสก์แบบ async และคืนค่า size (bytes)"""
@@ -460,7 +480,10 @@ async def _save_upload_to_disk(uf: UploadFile, dst_path: pathlib.Path, max_size:
             await f.write(chunk)
     return size_counter
 
-# ---------- Schemas ----------
+
+# ============================================================
+#                      Pydantic SCHEMAS
+# ============================================================
 class UserCreate(BaseModel):
     username: str
     name: str
@@ -542,6 +565,7 @@ class ChannelListAllItem(BaseModel):
     created_by: int
     created_at: datetime
     files: List[dict] 
+
 class ChannelUpdateStatus(BaseModel):
     channels_id: int
     status: RoleChannel
@@ -587,8 +611,11 @@ class AdminDecisionOut(BaseModel):
     decided_by: int
     decided_at: datetime
     message: str
-# ---------- App ----------
 
+
+# ============================================================
+#                  APP INITIALIZATION / MIDDLEWARE
+# ============================================================
 app = FastAPI(title="FastAPI + MariaDB + JWT")
 templates = Jinja2Templates(directory="templates")
 
@@ -622,6 +649,10 @@ async def on_startup():
 #     async with engine.begin() as conn:
 #         await conn.run_sync(Base.metadata.create_all)
 
+
+# ============================================================
+#                  BASIC / HEALTH ROUTES
+# ============================================================
 @app.get("/",status_code=200,response_class=HTMLResponse)
 async def root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
@@ -639,6 +670,10 @@ def healthz_head():
 def root_head():
     return Response(status_code=200)
 
+
+# ============================================================
+#                  AUTH ROUTES
+# ============================================================
 # ออก access token ด้วย username/password จาก DB
 @app.post("/auth/token")
 async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
@@ -649,6 +684,10 @@ async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = 
     access_token = create_access_token(data={"sub": str(user.users_id)})
     return {"access_token": access_token, "token_type": "bearer"}
 
+
+# ============================================================
+#                  USER ROUTES (CRUD + ROLE)
+# ============================================================
 # --- CRUD User ---
 # add user
 @app.post("/users", response_model=UserOut, status_code=201)
@@ -688,7 +727,6 @@ async def get_user_by_id_api(
     return user
 
 # Update: Update user info (username, name, email)
-
 @app.put("/users/{user_id}", response_model=UserOut)
 async def update_user(
     user_id: int,
@@ -799,6 +837,10 @@ async def get_user_by_token(current_user: User = Depends(get_current_user)):
         "role": current_user.role,
     }
 
+
+# ============================================================
+#                  CHANNEL & FILE SETTINGS
+# ============================================================
 # --- CRUD Channel & File ---
 
 # ตรวจไฟล์ (optional)
@@ -842,6 +884,10 @@ async def _save_upload_atomic(uf: UploadFile, final_path: pathlib.Path, max_size
     os.replace(tmp_path, final_path)
     return size_bytes
 
+
+# ============================================================
+#                  CHANNEL ROUTES
+# ============================================================
 @app.post("/channels", status_code=201)
 async def create_channel(
     title: str = Form(...),
@@ -1357,6 +1403,9 @@ async def list_all_channels(
     return channel_list_file
 
 
+# ============================================================
+#                  FILE ROUTES
+# ============================================================
 @app.post("/files/upload", status_code=201)
 async def upload_files_only(
     channel_id: int = Form(...),
@@ -1490,6 +1539,10 @@ async def delete_file(
         print(f"[RAG] failed to delete documents for file_id {file_id}: {e}")
     return
 
+
+# ============================================================
+#                  SESSION ROUTES
+# ============================================================
 @app.post("/create/session", status_code=201)
 async def create_session(
     payload: sessionCreate,
@@ -1563,6 +1616,10 @@ async def delete_session(session_id: int = Path(..., gt=0), db: AsyncSession = D
     await db.delete(session)
     return
 
+
+# ============================================================
+#                  CHAT + AI ROUTES
+# ============================================================
 @app.post("/sessions/{session_id}/ollama-reply", status_code=201)
 async def Talking_with_Ollama_from_document(
     session_id: int = Path(..., gt=0),
@@ -1691,8 +1748,11 @@ async def create_chat(chat: message, session_id: int = Query(..., gt=0), db: Asy
         "created_at": new_chat.created_at,
     }
     
+
+# ============================================================
+#                  DEBUG / UTIL ROUTES
+# ============================================================
 @app.post("/debug")
 def debug_endpoint():
     debug_list_docs_by_channel(channel_id=6)
     return {"message": "Debug payload received"}
-
