@@ -67,8 +67,8 @@ llm = Ollama(
     base_url=OLLAMA_BASE_URL,
     request_timeout=60.0,
     system_prompt=SAFETY_SYSTEM_PROMPT,
-    context_window=2048,
-    num_output=512,
+    context_window=8192,
+    num_output=1536,
     additional_kwargs={
             "options": {   
                 "temperature": 0.3,
@@ -108,68 +108,3 @@ index = VectorStoreIndex.from_documents(
 query_engine = index.as_query_engine(llm=llm)
 
 
-def _strip_think(text: str) -> str:
-    if not text:
-        return text
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"(?i)(^|\n)\s*(analysis:|reasoning:|thoughts?:).*?(?=\n\n|\Z)", "", text, flags=re.DOTALL)
-    return text.strip()
-
-def add_documents(docs):
-    for d in docs:
-        d.metadata = d.metadata or {}
-    nodes = node_parser.get_nodes_from_documents(docs)
-
-    VectorStoreIndex(
-        nodes,
-        embed_model=embed_model,
-        storage_context=storage_context,
-    )
-
-
-def delete_documents_by_metadata(metadata: dict):
-    where = {k: str(v) for k, v in metadata.items()}
-    chroma_collection.delete(where=where)
-
-def delete_documents_by_file_id(files_id: int | str):
-    where = {"files_id": str(files_id)}
-    print("[RAG] delete by file_id where =", where)
-    chroma_collection.delete(where=where)
-    
-
-def debug_list_docs_by_channel(channel_id: int):
-    res = chroma_collection.get(where={"channel_id": str(channel_id)})
-    print("[DEBUG] chroma docs for channel", channel_id)
-    print("ids:", res.get("ids"))
-    print("metadatas:", res.get("metadatas"))
-
-def rag_query_with_channel(question: str, channel_id: int, sessions_id: int) -> str:
-    filters = MetadataFilters(
-        filters=[ExactMatchFilter(key="channel_id", value=str(channel_id))]
-    )
-    
-    query_engine_with_channel = index.as_query_engine(
-        similarity_top_k=5,
-        filters=filters,
-        llm=llm,                
-        response_mode="compact"
-    )
-
-    response =  query_engine_with_channel.query(question)
-    print(f"[RAG] response: {response}")
-    
-    if not response.source_nodes:
-        return "ตอนนี้ยังไม่มีเอกสารที่ใช้ตอบได้เลยนะ🤔 รบกวนเพิ่มเอกสารก่อนนะคะ😊"
-
-    file_names = set()
-    for node_with_score in response.source_nodes:
-        meta = node_with_score.node.metadata
-        if "filename" in meta:
-            file_names.add(meta["filename"])
-
-    answer = _strip_think(str(response))
-    
-    if file_names:
-        print(f"[RAG] files used: {file_names}")
-        
-    return answer

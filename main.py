@@ -1,3 +1,4 @@
+# main.py
 # ============================================================
 #                      IMPORTS
 # ============================================================
@@ -33,7 +34,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
-from rag_engine import add_documents, debug_list_docs_by_channel, delete_documents_by_file_id, delete_documents_by_metadata, rag_query, rag_query_with_channel
+from rag_enginex import rag_engine
 
 # import fastapi
 # import asyncio
@@ -419,12 +420,8 @@ async def get_owned_session(
 # ============================================================
 #                      RAG / AI HELPERS
 # ============================================================
-def get_rag_query_with_channel():
-    from rag_engine import rag_query_with_channel
-    return rag_query_with_channel
 
-
-async def call_ai(messages: List[dict], channel_id: int) -> str:
+async def call_ai(messages: List[dict], channel_id: int,session_id: int ) -> str:
 
     # หา user message ตัวท้ายสุด
     last_user_msg = None
@@ -437,16 +434,8 @@ async def call_ai(messages: List[dict], channel_id: int) -> str:
 
     # LlamaIndex เป็น sync → offload ไป thread จะปลอดภัยกว่า
     loop = asyncio.get_running_loop()
-    answer = await loop.run_in_executor(None, rag_query_with_channel, last_user_msg, channel_id)
+    answer = await loop.run_in_executor(None, rag_engine.query, last_user_msg, channel_id, session_id)
     return answer
-
-def get_rag_query():
-    from rag_engine import rag_query
-    return rag_query
-
-def get_rag_index():
-    from rag_engine import index
-    return index    
 
 async def get_latest_pending_event( db: AsyncSession, channel_id: int) -> Optional[ChannelStatusEvent]:
     stmt = (
@@ -632,7 +621,8 @@ app.add_middleware(
                    "http://127.0.0.1:3000",
                    "http://127.0.0.1:5500",
                    "https://lukeenortaed.site", 
-                   "https://www.lukeenortaed.site"],
+                   "https://www.lukeenortaed.site",
+                   "https://5d0b1e4e7e04.ngrok-free.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -953,7 +943,7 @@ async def create_channel(
                         d.metadata["files_id"] = str(frow.files_id)
                     
                     # เติมเอกสารลงคอลเลกชันเดิม
-                    add_documents(docs)
+                    rag_engine.add_documents(docs)
 
                 except Exception as e:
                     print(f"[RAG] failed to index {abs_path}: {e}")
@@ -1054,7 +1044,7 @@ async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db),cur
     for file in flie_row:            
         try:
             # ลบเอกสารใน RAG (Chroma)
-            delete_documents_by_file_id(file.files_id)
+            rag_engine.delete_documents_by_file_id(file.files_id)
         except Exception as e:
             print(f"[RAG] failed to delete documents for file_id {file.files_id}: {e}")
     
@@ -1467,7 +1457,7 @@ async def upload_files_only(
                     d.metadata["files_id"] = str(frow.files_id)
 
                 # เติมเอกสารลงคอลเลกชันเดิม
-                add_documents(docs)
+                rag_engine.add_documents(docs)
 
             except Exception as e:
                 print(f"[RAG] failed to index {abs_path}: {e}")
@@ -1534,7 +1524,7 @@ async def delete_file(
     
     # ลบเอกสารออกจาก RAG (Chroma)
     try:
-        delete_documents_by_file_id(file.files_id)
+        rag_engine.delete_documents_by_file_id(file.files_id)
     except Exception as e:
         print(f"[RAG] failed to delete documents for file_id {file_id}: {e}")
     return
@@ -1595,7 +1585,7 @@ async def create_session(
     db.add(new_session)
     await db.flush()
     await db.refresh(new_session)
-
+    # rag_engine.debug_list_docs_by_channel(new_session.channel_id)
     return {
         "session_id": new_session.sessions_id,
         "channel_id": new_session.channel_id,
@@ -1658,7 +1648,7 @@ async def Talking_with_Ollama_from_document(
     ]
 
     # 4) เรียก RAG / AI
-    ai_text = await call_ai(ai_messages, sess.channel_id)
+    ai_text = await call_ai(ai_messages, sess.channel_id, sess.sessions_id)
 
     # 5) เซฟคำตอบ AI
     ai_chat = chats(
@@ -1754,5 +1744,5 @@ async def create_chat(chat: message, session_id: int = Query(..., gt=0), db: Asy
 # ============================================================
 @app.post("/debug")
 def debug_endpoint():
-    debug_list_docs_by_channel(channel_id=6)
+    rag_engine.debug_list_docs_by_channel(channel_id=6)
     return {"message": "Debug payload received"}
