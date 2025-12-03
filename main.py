@@ -5,6 +5,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import shutil
 from typing import Optional, AsyncGenerator, List
 # from urllib import response
 import uuid, pathlib
@@ -17,7 +18,7 @@ from passlib.context import CryptContext
 from pydantic import BaseModel , EmailStr
 from pydantic_settings import BaseSettings
 from sqlalchemy import String, desc, func, select ,Enum as SAEnum, ForeignKey, text
-from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase
+from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, joinedload, relationship
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
     AsyncSession,
@@ -52,6 +53,7 @@ class Settings(BaseSettings):
     secret_key: str = os.getenv("SECRET_KEY")
     access_token_expire_minutes: int = 720
     upload_root: pathlib.Path = pathlib.Path("./uploads")
+    TRASH_DIR: pathlib.Path = pathlib.Path("./trash")
     class Config:
         env_file = ".env"
 
@@ -134,6 +136,7 @@ class Channel(Base):
         nullable=False,
     )
     
+    files = relationship("File", back_populates="channel")
     
 class User(Base):
     __tablename__ = "users"
@@ -201,12 +204,13 @@ class File(Base):
     __tablename__ = "files"
     files_id: Mapped[int] = mapped_column("files_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
     uploaded_by: Mapped[Optional[int]] = mapped_column("uploaded_by", MyInt(unsigned=True), nullable=True)
-    channel_id: Mapped[Optional[int]] = mapped_column("channel_id", MyInt(unsigned=True), nullable=True)
+    channel_id: Mapped[Optional[int]] = mapped_column("channel_id", MyInt(unsigned=True), ForeignKey("channels.channels_id") , nullable=True)
     original_filename: Mapped[str] = mapped_column("original_filename", String(512), nullable=False)
-    storage_uri: Mapped[str] = mapped_column("storage_uri", String(1024), nullable=False)  # เก็บ path/URL ให้ชัดเจน
+    storage_uri: Mapped[str] = mapped_column("storage_uri", String(1024), nullable=False)
     size_bytes: Mapped[Optional[int]] = mapped_column("size_bytes", MyInt(unsigned=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
+    channel = relationship("Channel", back_populates="files")
 class sessions(Base):
     __tablename__ = "sessions"
     sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
@@ -616,13 +620,14 @@ app.mount("/static/uploads", StaticFiles(directory=UPLOAD_ROOT), name="uploads")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["192.168.1.122:3000", 
+    allow_origins=["http://192.168.1.122:3000", 
                    "http://localhost:3000", 
                    "http://127.0.0.1:3000",
                    "http://127.0.0.1:5500",
                    "https://lukeenortaed.site", 
                    "https://www.lukeenortaed.site",
-                   "https://5d0b1e4e7e04.ngrok-free.app"],
+                   "https://*.ngrok-free.app"],
+    allow_origin_regex=r"https://.*\.ngrok-free\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1486,47 +1491,62 @@ async def upload_files_only(
 
 @app.delete("/files/delete/{file_id}", status_code=204)
 async def delete_file(
-    # channel_id: int = Path(..., gt=0),
     file_id: int = Path(..., gt=0),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(File).where(File.files_id == file_id))
+    # 1. Query แบบ Join เพื่อลดการเรียก DB หลายรอบ
+    stmt = (
+        select(File)
+        .options(joinedload(File.channel)) 
+        .where(File.files_id == file_id)
+    )
+    result = await db.execute(stmt)
     file = result.scalar_one_or_none()
+
     if file is None:
         raise HTTPException(status_code=404, detail="File not found")
 
-    # ตรวจสอบสิทธิ์: admin หรือเจ้าของไฟล์ หรือเจ้าของ channel ที่ไฟล์อยู่
-    if current_user.role != RoleUser.admin and file.uploaded_by != current_user.users_id:
-        # ต้องตรวจสอบเจ้าของ channel ด้วย
-        channel = await db.execute(select(Channel).where(Channel.channels_id == file.channel_id))
-        channel = channel.scalar_one_or_none()
-        if channel is None or channel.created_by != current_user.users_id:
-            raise HTTPException(status_code=403, detail="Not authorized to delete this file")
+    # 2. Check Permission (Logic เดิมแต่เขียนให้กระชับ)
+    is_admin = current_user.role == RoleUser.admin
+    is_file_owner = file.uploaded_by == current_user.users_id
+    is_channel_owner = file.channel and file.channel.created_by == current_user.users_id
+
+    if not (is_admin or is_file_owner or is_channel_owner):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # 3. เตรียม Path (แก้ Hardcoded Path D:/...)
+    # ควรใช้ Path สัมพัทธ์ หรือดึงจาก Env Config
+    trash_folder = settings.TRASH_DIR
+    src = UPLOAD_ROOT / file.storage_uri
+    dst = trash_folder / f"{file.channel_id}_{file.files_id}_{src.name}"
+
+    # 4. ย้ายไฟล์แบบ Non-blocking (ใช้ Thread แยก)
+    # เพื่อไม่ให้ Server ค้างระหว่างย้ายไฟล์
+    async def move_file_task():
+        if src.exists():
+            trash_folder.mkdir(parents=True, exist_ok=True)
+            # shutil.move ปลอดภัยกว่า rename กรณีข้าม drive
+            await asyncio.to_thread(shutil.move, str(src), str(dst))
 
     try:
-        src = UPLOAD_ROOT / file.storage_uri
-        trash_folder = Path("D:/ECT/Project/FastAPITest/trash")
-        trash_folder.mkdir(parents=True, exist_ok=True)
-
-        # ตั้งชื่อใหม่กันชนกับไฟล์ใน trash ที่มีอยู่
-        filename = src.name
-        dst = trash_folder / f"{file.channel_id}_{file.files_id}_{filename}"
-
-        if src.exists():
-            src.rename(dst)
-
+        await move_file_task()
     except Exception as e:
-        print(f"[FILE] failed to move file to trash: {e}")
+        print(f"[FILE] Move to trash failed: {e}")
+        # ตัดสินใจตรงนี้: ถ้าย้ายไฟล์ไม่ผ่าน จะให้ลบ DB ไหม? 
+        # ปกติถ้าไฟล์จริงลบไม่ได้ ก็ไม่ควรลบ record ใน DB -> ควร raise Error
+        raise HTTPException(status_code=500, detail="Failed to move file to trash")
 
-    # ลบเรคคอร์ดใน DB
+    # 5. สั่งลบใน Session (รอ Auto-commit ทำงานตอนจบ request)
     await db.delete(file)
     
-    # ลบเอกสารออกจาก RAG (Chroma)
+    # 6. ลบ RAG 
+    # (ควรทำหลังจากมั่นใจว่าไฟล์ไปแล้ว)
     try:
         rag_engine.delete_documents_by_file_id(file.files_id)
     except Exception as e:
-        print(f"[RAG] failed to delete documents for file_id {file_id}: {e}")
+        print(f"[RAG] Warning: RAG deletion failed: {e}")
+
     return
 
 
