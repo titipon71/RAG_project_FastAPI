@@ -17,7 +17,9 @@ from llama_index.core import (
 from llama_index.core.node_parser import SemanticSplitterNodeParser
 from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
 from llama_index.core.schema import NodeWithScore
+from llama_index.storage.chat_store.redis import RedisChatStore
 
+from llama_index.core.memory import ChatMemoryBuffer
 # --- Integrations ---
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
@@ -44,7 +46,10 @@ class AppConfig:
     # Models
     EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "scb10x/llama3.2-typhoon2-1b-instruct:latest")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3:1.7b")
+    
+    # Redis
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
     
     # Parameters
     CONTEXT_WINDOW: int = 4096
@@ -90,8 +95,21 @@ class RAGService:
         # 3. Load Index
         logger.info("Loading/Creating Vector Index...")
         self.index = self._load_or_create_index()
-        logger.info("✅ RAG Service Ready!")
 
+        logger.info(f"Initializing Redis Chat Store at {config.REDIS_URL}...")
+        try:
+            self.chat_store = RedisChatStore(redis_url=config.REDIS_URL)
+            if self.chat_store._redis_client.ping():
+                logger.info("✅ Connected to Redis Chat Store successfully.")
+            else:
+                logger.warning("⚠️ Failed to connected Redis Chat Store.")
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to Redis: {e}")
+            # Fallback or raise error depending on requirement
+            raise e
+                
+        logger.info("✅ RAG Service Ready!")
+        
     def _ensure_directories(self):
         os.makedirs(config.DATA_DIR, exist_ok=True)
         os.makedirs(config.CHROMA_DIR, exist_ok=True)
@@ -114,16 +132,14 @@ class RAGService:
         return Ollama(
             model=config.OLLAMA_MODEL,
             base_url=config.OLLAMA_BASE_URL,
-            request_timeout=60.0,
-            system_prompt=config.SAFETY_SYSTEM_PROMPT,
+            request_timeout=120.0,
             context_window=config.CONTEXT_WINDOW,
             num_output=config.NUM_OUTPUT,
-            additional_kwargs={
-                "options": {
-                    "temperature": 0.3,
-                    "top_p": 0.8,
-                }
-            },
+            system_prompt=config.SAFETY_SYSTEM_PROMPT,
+            # temperature=0.3,
+            # additional_kwargs={
+            #         "top_p": 0.8,
+            # },
         )
 
     def _init_chroma(self):
@@ -198,6 +214,22 @@ class RAGService:
     def delete_documents_by_file_id(self, files_id: Union[str, int]):
         self.delete_documents_by_metadata({"files_id": str(files_id)})
 
+    def clear_session_history(self, sessions_id: Union[str, int]):
+
+        if not sessions_id:
+            logger.warning("⚠️ No session_id provided to clear history.")
+            return
+
+        user_key = str(sessions_id)
+        logger.info(f"🗑️ Clearing chat history for session: {user_key}")
+        
+        try:
+            self.chat_store.delete_messages(user_key)
+            logger.info(f"✅ Successfully cleared history for {user_key}")
+        except Exception as e:
+            logger.error(f"❌ Failed to clear history for {user_key}: {e}")
+
+    
     def query(self, question: str, channel_id: Union[str, int], sessions_id: Optional[int] = None) -> str:
         logger.info(f"Querying: {question} (Channel: {channel_id})")
         
@@ -205,14 +237,26 @@ class RAGService:
             filters=[ExactMatchFilter(key="channel_id", value=str(channel_id))]
         )
         
-        query_engine = self.index.as_query_engine(
+        user_key = str(sessions_id) if sessions_id else "global_guest"
+        
+        memory = ChatMemoryBuffer.from_defaults(
+            token_limit=3000,
+            chat_store=self.chat_store,  
+            chat_store_key=user_key     
+        )
+        
+        
+        chat_engine = self.index.as_chat_engine(
+            chat_mode="context",
+            memory=memory,
             similarity_top_k=config.TOP_K,
             filters=filters,
             llm=self.llm,                
-            response_mode="compact"
+            response_mode="compact",
+            # system_prompt=config.SAFETY_SYSTEM_PROMPT,
         )
 
-        response = query_engine.query(question)
+        response = chat_engine.chat(question)
 
         if not response.source_nodes:
             logger.info("No source nodes found.")
@@ -240,35 +284,9 @@ class RAGService:
 # ==========================================
 # 3. Global Instance (Eager Loading)
 # ==========================================
-# การประกาศตรงนี้จะทำให้ Model โหลดทันทีที่ import ไฟล์นี้
-# ข้อดี: เรียกใช้ครั้งแรกเร็ว
-# ข้อเสีย: กิน Resource ทันที, start server ช้านิดนึง
 
 try:
     rag_engine = RAGService()
 except Exception as e:
     logger.error(f"Failed to initialize RAG Engine: {e}")
     rag_engine = None
-
-# ==========================================
-# 4. Helper Functions (Backward Compatibility)
-# ==========================================
-# ฟังก์ชันพวกนี้มีไว้เพื่อให้โค้ดเก่าของคุณเรียกใช้ได้โดยไม่ต้องแก้เยอะ
-# แต่จริงๆ แล้วควรเรียก rag_engine.query() โดยตรงจะดีกว่า
-
-def rag_query_with_channel(question: str, channel_id: int, sessions_id: int) -> str:
-    if rag_engine:
-        return rag_engine.query(question, channel_id, sessions_id)
-    return "System Error: RAG Engine not initialized."
-
-def add_documents(docs):
-    if rag_engine:
-        rag_engine.add_documents(docs)
-
-def delete_documents_by_file_id(files_id):
-    if rag_engine:
-        rag_engine.delete_documents_by_file_id(files_id)
-
-def debug_list_docs_by_channel(channel_id):
-    if rag_engine:
-        rag_engine.debug_list_docs(channel_id)

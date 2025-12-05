@@ -605,6 +605,10 @@ class AdminDecisionOut(BaseModel):
     decided_at: datetime
     message: str
 
+class SessionList(BaseModel):
+    session_id: int
+    
+
 
 # ============================================================
 #                  APP INITIALIZATION / MIDDLEWARE
@@ -1620,10 +1624,15 @@ async def delete_session(session_id: int = Path(..., gt=0), db: AsyncSession = D
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    if current_user.role != RoleUser.admin and session.user_id != current_user.users_id:
+    isAdmin = (current_user.role == RoleUser.admin)
+    isOwner = (session.user_id == current_user.users_id)
+    
+    if not isAdmin and not isOwner:
         raise HTTPException(status_code=403, detail="Not authorized to delete this session")
     
     await db.delete(session)
+    rag_engine.clear_session_history(session.sessions_id)
+    
     return
 
 
@@ -1697,6 +1706,8 @@ async def Talking_with_Ollama_from_document(
             "created_at": ai_chat.created_at,
         },
     }
+
+
 
 
 @app.get("/sessions/{session_id}/history", response_model=List[chatHistoryItem])
