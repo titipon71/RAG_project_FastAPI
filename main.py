@@ -15,7 +15,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 # import httpx
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel , EmailStr
+from pydantic import BaseModel , EmailStr, field_validator, Field
 from pydantic_settings import BaseSettings
 from sqlalchemy import String, desc, func, select ,Enum as SAEnum, ForeignKey, text
 from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, joinedload, relationship
@@ -35,11 +35,13 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
+from hashids import Hashids
+
+from dotenv import load_dotenv
+
 from rag_enginex import rag_engine
 
-# import fastapi
-# import asyncio
-# import fastapi_swagger_dark as fsd
+
 # from fastapi_limiter import FastAPILimiter
 # from fastapi_limiter.depends import RateLimiter
 # from fastapi.responses import JSONResponse
@@ -48,17 +50,43 @@ from rag_enginex import rag_engine
 # ============================================================
 #                      SETTINGS / CONFIG
 # ============================================================
+
+load_dotenv()
 class Settings(BaseSettings):
     database_url: str
     secret_key: str = os.getenv("SECRET_KEY")
     access_token_expire_minutes: int = 720
     upload_root: pathlib.Path = pathlib.Path("./uploads")
     TRASH_DIR: pathlib.Path = pathlib.Path("./trash")
+    HASH_SALT: str = os.getenv("HASH_SALT")
+    MIN_LENGTH: int = int(os.getenv("MIN_LENGTH", 8))
     class Config:
         env_file = ".env"
 
 settings = Settings()
 
+# ============================================================
+#                  Hashids INITIALIZATION
+# ============================================================
+hasher = Hashids(salt=settings.HASH_SALT, min_length=settings.MIN_LENGTH)
+def encode_id(hashed_id: int) -> str:
+    
+    # debug
+    print(f"Encoding ID: {hashed_id}")
+    
+    return hasher.encode(hashed_id)
+
+def decode_id(hashed_id: str) -> Optional[int]:
+    if not hashed_id:
+        return None
+    
+    decoded = hasher.decode(hashed_id)
+    # debug
+    print(f"Decoding hashed ID: {hashed_id} to {decoded}")
+    
+    if not decoded:
+        return None
+    return decoded[0]
 
 # ============================================================
 #                  DB BASE & ENUMS (SQLAlchemy)
@@ -582,8 +610,18 @@ class chatHistoryItem(BaseModel):
     sender_type: RoleSender
     created_at: datetime
 
-class message(BaseModel):
+class ChatRequest(BaseModel):
+    sessions_id: str
     message: str
+    
+    @field_validator('sessions_id', mode='before')
+    def encode_session_id(cls, v):
+        if isinstance(v, str):
+            real_id = decode_id(v)
+            if real_id is None:
+                raise ValueError("Invalid Session ID")
+            return real_id
+        return v 
 
 class ModerationResponse(BaseModel):
     channel_id: int
@@ -605,10 +643,18 @@ class AdminDecisionOut(BaseModel):
     decided_at: datetime
     message: str
 
-class SessionList(BaseModel):
-    session_id: int
     
-
+class SessionResponse(BaseModel):
+    sessions_id: str  = Field(..., validation_alias="sessions_id")
+    channel_id: int
+    user_id: int
+    created_at: datetime
+    
+    @field_validator('sessions_id', mode='before')
+    def encode_session_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v) 
+        return v    
 
 # ============================================================
 #                  APP INITIALIZATION / MIDDLEWARE
@@ -990,7 +1036,12 @@ async def create_channel(
 
 
 @app.get("/channels/{channel_id}", response_model=ChannelOut)
-async def get_channel_details(channel_id: int, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def get_channel_details(
+    channel_id: int, 
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+    ):
+    
     result = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
     channel = result.scalar_one_or_none()
     if channel is None:
@@ -1048,7 +1099,9 @@ async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db),cur
             detail="Not authorized to delete this channel"
         ) 
     
-    flie_row = await db.execute(select(File).where(File.channel_id == channel.channels_id)).scalars().all()
+    flie_row_result = await db.execute(select(File).where(File.channel_id == channel.channels_id))
+    flie_row = flie_row_result.scalars().all()
+    
     # ลบเอกสารใน RAG (Chroma) ทั้งหมดที่เกี่ยวข้องกับไฟล์ใน channel นี้
     for file in flie_row:            
         try:
@@ -1557,7 +1610,7 @@ async def delete_file(
 # ============================================================
 #                  SESSION ROUTES
 # ============================================================
-@app.post("/create/session", status_code=201)
+@app.post("/session", status_code=201 , response_model=SessionResponse)
 async def create_session(
     payload: sessionCreate,
     db: AsyncSession = Depends(get_db),
@@ -1610,17 +1663,19 @@ async def create_session(
     await db.flush()
     await db.refresh(new_session)
     # rag_engine.debug_list_docs_by_channel(new_session.channel_id)
-    return {
-        "session_id": new_session.sessions_id,
-        "channel_id": new_session.channel_id,
-        "user_id": new_session.user_id,
-        "created_at": new_session.created_at,
-    }
+    return new_session
 
-@app.delete("/delete/session/{session_id}", status_code=204)
-async def delete_session(session_id: int = Path(..., gt=0), db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    result = await db.execute(select(sessions).where(sessions.sessions_id == session_id))
+@app.delete("/session/delete/{session_hash}", status_code=204)
+async def delete_session(
+    session_hash: str = Path(..., title="The hashed session ID"), # 1. เปลี่ยนรับเป็น String (Hash)
+    db: AsyncSession = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    real_session_id = decode_id(session_hash)
+    
+    result = await db.execute(select(sessions).where(sessions.sessions_id == real_session_id))
     session = result.scalar_one_or_none()
+    
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -1631,7 +1686,8 @@ async def delete_session(session_id: int = Path(..., gt=0), db: AsyncSession = D
         raise HTTPException(status_code=403, detail="Not authorized to delete this session")
     
     await db.delete(session)
-    rag_engine.clear_session_history(session.sessions_id)
+    
+    rag_engine.clear_session_history(session.sessions_id) 
     
     return
 
@@ -1639,10 +1695,9 @@ async def delete_session(session_id: int = Path(..., gt=0), db: AsyncSession = D
 # ============================================================
 #                  CHAT + AI ROUTES
 # ============================================================
-@app.post("/sessions/{session_id}/ollama-reply", status_code=201)
+@app.post("/sessions/ollama-reply", status_code=201)
 async def Talking_with_Ollama_from_document(
-    session_id: int = Path(..., gt=0),
-    payload: message = Body(...),
+    payload: ChatRequest = Body(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1650,7 +1705,7 @@ async def Talking_with_Ollama_from_document(
     sess_stmt = (
         select(sessions)
         .where(
-            sessions.sessions_id == session_id,
+            sessions.sessions_id == payload.session_id,
             sessions.user_id == current_user.users_id,
         )
     )
@@ -1711,7 +1766,10 @@ async def Talking_with_Ollama_from_document(
 
 
 @app.get("/sessions/{session_id}/history", response_model=List[chatHistoryItem])
-async def get_chat_history(session_id: int = Path(..., gt=0), db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def get_chat_history(session_id: int = Path(..., gt=0),
+                           db: AsyncSession = Depends(get_db),
+                           current_user: User = Depends(get_current_user)
+                           ):
     # 1) ตรวจว่า session นี้เป็นของ user นี้จริงไหม
     owned_sess = await get_owned_session(db, session_id, current_user.users_id)
     if owned_sess is None:
@@ -1740,35 +1798,6 @@ async def get_chat_history(session_id: int = Path(..., gt=0), db: AsyncSession =
 
     return history
 
-@app.post("/chats", status_code=201)
-async def create_chat(chat: message, session_id: int = Query(..., gt=0), db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # 1) ตรวจว่า session นี้เป็นของ user นี้จริงไหม
-    owned_sess = await get_owned_session(db, session_id, current_user.users_id)
-    if owned_sess is None:
-        # ไม่ใช่ของเขา หรือไม่มีอยู่
-        raise HTTPException(status_code=403, detail="Not your session")
-
-    # 2) ตอนนี้เรารู้แล้วว่า session นี้ของ user นี้ และรู้ด้วยว่าอยู่ channel ไหน
-    #    owned_sess.channel_id คือ channel ที่ session นี้อยู่
-    new_chat = chats(
-        channels_id=owned_sess.channel_id,
-        users_id=current_user.users_id,
-        sessions_id=owned_sess.sessions_id,
-        message=chat.message,
-        sender_type=RoleSender.user,   # หรือจะให้ client ส่งมาก็ได้ แต่ควร validate
-    )
-    db.add(new_chat)
-    await db.flush()
-    await db.refresh(new_chat)
-
-    return {
-        "chat_id": new_chat.chat_id,
-        "channel_id": new_chat.channels_id,
-        "session_id": new_chat.sessions_id,
-        "message": new_chat.message,
-        "created_at": new_chat.created_at,
-    }
-    
 
 # ============================================================
 #                  DEBUG / UTIL ROUTES

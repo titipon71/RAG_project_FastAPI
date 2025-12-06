@@ -5,6 +5,10 @@ from typing import List, Optional, Dict, Any, Union
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+from rich.logging import RichHandler
+from rich.console import Console
+from rich.theme import Theme
+from rich.logging import RichHandler
 
 # --- LlamaIndex Core ---
 from llama_index.core import (
@@ -27,8 +31,35 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
-# --- Logging Setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# ==========================================
+# 0. Logging Setup (Custom Colors)
+# ==========================================
+
+custom_theme = Theme({
+    "log.time": "bright_white",
+    "logging.level.debug": "cyan dim",
+    "logging.level.info": "bold #00afff",       
+    "logging.level.warning": "bold yellow",
+    "logging.level.error": "bold red",
+    "logging.level.critical": "bold white on red",    
+})
+
+console = Console(theme=custom_theme)
+
+logging.basicConfig(
+    level="INFO",
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[
+        RichHandler(
+            console=console,            
+            rich_tracebacks=True,       
+            markup=True,                
+            show_path=False             
+        )
+    ]
+)
+
 logger = logging.getLogger("RAG_ENGINE")
 
 load_dotenv()
@@ -69,25 +100,26 @@ class AppConfig:
 config = AppConfig()
 
 # ==========================================
-# 2. RAG Service Class (Logic หลัก)
+# 2. RAG Service Class
 # ==========================================
 class RAGService:
     def __init__(self):
-        logger.info("🚀 Initializing RAG Service...")
+        # ใส่สี [bold cyan] เพื่อความสวยงาม
+        logger.info("[bold cyan]🚀 Initializing RAG Service...[/]")
         self._ensure_directories()
         
         # 1. Init Models (Heavy Load)
-        logger.info(f"Loading Embedding Model: {config.EMBED_MODEL_NAME}")
+        logger.info(f"Loading Embedding Model: [yellow]{config.EMBED_MODEL_NAME}[/]")
         self.embed_model = self._init_embed_model()
         
         logger.info("Initializing Node Parser...")
         self.node_parser = self._init_node_parser()
         
-        logger.info(f"Connecting to Ollama: {config.OLLAMA_MODEL}")
+        logger.info(f"Connecting to Ollama: [yellow]{config.OLLAMA_MODEL}[/]")
         self.llm = self._init_llm()
         
         # 2. Init Database & Storage
-        logger.info("Connecting to ChromaDB...")
+        logger.info("Connecting to [bright_blue]ChromaDB...[/]")
         self.chroma_collection = self._init_chroma()
         self.vector_store = ChromaVectorStore(chroma_collection=self.chroma_collection)
         self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
@@ -96,19 +128,20 @@ class RAGService:
         logger.info("Loading/Creating Vector Index...")
         self.index = self._load_or_create_index()
 
-        logger.info(f"Initializing Redis Chat Store at {config.REDIS_URL}...")
+        logger.info(f"Initializing Redis Chat Store at [italic hot_pink]{config.REDIS_URL}[/]...")
         try:
             self.chat_store = RedisChatStore(redis_url=config.REDIS_URL)
+            # ตรวจสอบว่า Redis ต่อติดจริงไหม
             if self.chat_store._redis_client.ping():
-                logger.info("✅ Connected to Redis Chat Store successfully.")
+                logger.info("[bold green]✅ Connected to Redis Chat Store successfully.[/]")
             else:
-                logger.warning("⚠️ Failed to connected Redis Chat Store.")
+                logger.warning("[bold yellow]⚠️ Failed to connected Redis Chat Store.[/]")
         except Exception as e:
-            logger.error(f"❌ Failed to connect to Redis: {e}")
+            logger.error(f"[bold red]❌ Failed to connect to Redis:[/]\n{e}")
             # Fallback or raise error depending on requirement
             raise e
                 
-        logger.info("✅ RAG Service Ready!")
+        logger.info("[bold green]✅ RAG Service Ready![/]")
         
     def _ensure_directories(self):
         os.makedirs(config.DATA_DIR, exist_ok=True)
@@ -192,7 +225,7 @@ class RAGService:
         if not docs:
             return
             
-        logger.info(f"Adding {len(docs)} documents...")
+        logger.info(f"Adding [bold]{len(docs)}[/] documents...")
         for d in docs:
             d.metadata = d.metadata or {}
         
@@ -204,11 +237,11 @@ class RAGService:
         
         # Persist ลง Storage (ปกติ ChromaVectorStore จะ Auto-persist แต่เรียกไว้เพื่อความชัวร์ในบาง version)
         self.index.storage_context.persist()
-        logger.info(f"Successfully added {len(nodes)} nodes to index.")
+        logger.info(f"Successfully added [bold green]{len(nodes)}[/] nodes to index.")
 
     def delete_documents_by_metadata(self, metadata: Dict[str, Any]):
         where = {k: str(v) for k, v in metadata.items()}
-        logger.info(f"Deleting documents where: {where}")
+        logger.info(f"Deleting documents where: [yellow]{where}[/]")
         self.chroma_collection.delete(where=where)
 
     def delete_documents_by_file_id(self, files_id: Union[str, int]):
@@ -221,17 +254,17 @@ class RAGService:
             return
 
         user_key = str(sessions_id)
-        logger.info(f"🗑️ Clearing chat history for session: {user_key}")
+        logger.info(f"🗑️ Clearing chat history for session: [bold]{user_key}[/]")
         
         try:
             self.chat_store.delete_messages(user_key)
-            logger.info(f"✅ Successfully cleared history for {user_key}")
+            logger.info(f"[bold green]✅ Successfully cleared history for {user_key}[/]")
         except Exception as e:
-            logger.error(f"❌ Failed to clear history for {user_key}: {e}")
+            logger.error(f"[bold red]❌ Failed to clear history for {user_key}:[/]\n{e}")
 
     
     def query(self, question: str, channel_id: Union[str, int], sessions_id: Optional[int] = None) -> str:
-        logger.info(f"Querying: {question} (Channel: {channel_id})")
+        logger.info(f"Querying: [bold cyan]{question}[/] (Channel: {channel_id})")
         
         filters = MetadataFilters(
             filters=[ExactMatchFilter(key="channel_id", value=str(channel_id))]
@@ -259,7 +292,7 @@ class RAGService:
         response = chat_engine.chat(question)
 
         if not response.source_nodes:
-            logger.info("No source nodes found.")
+            logger.info("[yellow]No source nodes found.[/]")
             return "ตอนนี้ยังไม่มีเอกสารที่ใช้ตอบได้เลยนะ🤔 รบกวนเพิ่มเอกสารก่อนนะคะ😊"
 
 
@@ -269,7 +302,7 @@ class RAGService:
             if node.node.metadata.get("filename")
         }
         if file_names:
-            logger.info(f"Sources used: {file_names}")
+            logger.info(f"Sources used: [green]{file_names}[/]")
 
         return self._strip_think(str(response))
 
@@ -288,5 +321,5 @@ class RAGService:
 try:
     rag_engine = RAGService()
 except Exception as e:
-    logger.error(f"Failed to initialize RAG Engine: {e}")
+    logger.exception("Failed to initialize RAG Engine")
     rag_engine = None

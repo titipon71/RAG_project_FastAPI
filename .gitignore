@@ -24,8 +24,11 @@ ENV/
 Thumbs.db
 
 # Environment variables
-
+.env
 
 # FastAPI specific (optional)
 *.db
 *.sqlite3
+
+# vecotorstore
+chroma_db/
