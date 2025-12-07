@@ -10,7 +10,7 @@ from typing import Optional, AsyncGenerator, List
 # from urllib import response
 import uuid, pathlib
 import aiofiles
-from fastapi import Body, FastAPI, APIRouter, Depends, File as FormFile, Form, UploadFile, HTTPException, status, Query, Path , Request, Response
+from fastapi import Body, FastAPI, APIRouter, Depends, File as FastAPIFile, Form, UploadFile, HTTPException, status, Query, Path , Request, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 # import httpx
 from jose import JWTError, jwt
@@ -534,12 +534,17 @@ class UserPasswordUpdate(BaseModel):
 class UserRoleUpdate(BaseModel):
     users_id: int
     new_role: RoleUser
-    secret_key: str
-    
+    secret_key: str    
 
 class ChannelCreate(BaseModel):
     title: str
     description: Optional[str] = None
+
+class ChannelResponse(BaseModel):
+    channels_id: int
+    title: str
+    description: Optional[str] = None
+    status: str  # หรือเป็น Enum ตาม RoleChannel ของคุณ
 
 class ChannelOut(BaseModel):
     channels_id: int
@@ -655,6 +660,20 @@ class SessionResponse(BaseModel):
         if isinstance(v, int):
             return encode_id(v) 
         return v    
+
+class FileDetail(BaseModel):
+    files_id: str = Field(..., description="Hashed ID ของไฟล์")
+    original_filename: str = Field(..., description="ชื่อไฟล์เดิม")
+    size_bytes: int = Field(..., description="ขนาดไฟล์ (bytes)")
+    mime: str = Field(..., description="ชนิดไฟล์ (MIME type)")
+    channel_id: int = Field(..., description="ID ของ Channel ที่อัปโหลด")
+    public_url: Optional[str] = Field(None, description="URL สำหรับเข้าถึงไฟล์ (มีเฉพาะกรณี public channel)")
+
+class FileUploadResponse(BaseModel):
+    files: list[FileDetail]
+
+class FileListItem(BaseModel):
+    files: list[FileDetail]
 
 # ============================================================
 #                  APP INITIALIZATION / MIDDLEWARE
@@ -933,105 +952,23 @@ async def _save_upload_atomic(uf: UploadFile, final_path: pathlib.Path, max_size
 # ============================================================
 #                  CHANNEL ROUTES
 # ============================================================
-@app.post("/channels", status_code=201)
+@app.post("/channels", status_code=201, response_model=ChannelResponse)
 async def create_channel(
-    title: str = Form(...),
-    description: str | None = Form(None),
-    uploaded_files: list[UploadFile] | None = FormFile(None),
+    channel_in: ChannelCreate,  
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # 1) สร้าง channel
-    channel = Channel(
-        title=title,
-        description=description,
+    new_channel = Channel(
+        title=channel_in.title,
+        description=channel_in.description,
         created_by=current_user.users_id,
         status=RoleChannel.private
     )
-    db.add(channel)
-    await db.flush()  # ได้ channels_id
 
-    await db.refresh(channel, attribute_names=["channels_id", "status", "created_at"])
-    is_public = (channel.status == RoleChannel.public)
-
-    stored_files: list[dict] = []
-    created_paths: list[pathlib.Path] = []
-
-    try:
-        if uploaded_files:
-            if len(uploaded_files) > 10:
-                raise HTTPException(status_code=400, detail="Too many files in one request")
-            
-            for uf in uploaded_files:
-                final_path, rel_path = _build_storage_path(channel.channels_id, uf.filename)
-
-                # 2) เขียนไฟล์ async + ตรวจขนาด
-                size_bytes = await _save_upload_atomic(uf, final_path, MAX_SIZE_PER_FILE)
-                created_paths.append(final_path)
-                await uf.close()
-
-                # 3) ตรวจ mime จริง (optional)
-                detected = sniff_mime(final_path)
-                if detected not in ALLOW_MIME:
-                    final_path.unlink(missing_ok=True)
-                    raise HTTPException(status_code=400, detail=f"Unsupported file type: {detected}")
-
-                # 4) บันทึก DB โดยเก็บ relative path
-                frow = File(
-                    uploaded_by=current_user.users_id,
-                    channel_id=channel.channels_id,
-                    original_filename=uf.filename or final_path.name,
-                    storage_uri=rel_path,
-                    size_bytes=size_bytes,
-                )
-                db.add(frow)
-                await db.flush()
-
-                # 5) เติมเอกสารเข้า RAG (Chroma) ทันที
-                abs_path = UPLOAD_ROOT / rel_path
-                try:
-                    docs = SimpleDirectoryReader(input_files=[str(abs_path)]).load_data()
-                    for d in docs:
-                        d.metadata = d.metadata or {}
-                        d.metadata["channel_id"] = str(channel.channels_id)
-                        d.metadata["filename"] = frow.original_filename
-                        d.metadata["files_id"] = str(frow.files_id)
-                    
-                    # เติมเอกสารลงคอลเลกชันเดิม
-                    rag_engine.add_documents(docs)
-
-                except Exception as e:
-                    print(f"[RAG] failed to index {abs_path}: {e}")
-
-                resp = {
-                    "files_id": frow.files_id,
-                    "original_filename": frow.original_filename,
-                    "size_bytes": size_bytes,
-                    "mime": detected,
-                }
-                if is_public:
-                    resp["public_url"] = f"/static/uploads/{rel_path}"
-                stored_files.append(resp)
-
-        await db.refresh(channel)
-
-    except Exception:
-        for p in created_paths:
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                pass
-        raise
-
-    return {
-        "channel": {
-            "channels_id": channel.channels_id,
-            "title": channel.title,
-            "description": channel.description,
-            "status": channel.status,
-        },
-        "files": stored_files,
-    }
+    db.add(new_channel)
+    await db.flush()
+    await db.refresh(new_channel) 
+    return new_channel
 
 
 
@@ -1458,10 +1395,9 @@ async def list_all_channels(
 # ============================================================
 #                  FILE ROUTES
 # ============================================================
-@app.post("/files/upload", status_code=201)
-async def upload_files_only(
-    channel_id: int = Form(...),
-    files: list[UploadFile] = FormFile(...),
+@app.get("/files/list/{channel_id}", response_model=FileListItem)
+async def list_files_in_channel(
+    channel_id: int = Path(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1470,16 +1406,58 @@ async def upload_files_only(
     channel = res.scalar_one_or_none()
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
+    
+    is_private = channel.status in (RoleChannel.private , RoleChannel.pending)
+    is_owner = (channel.created_by == current_user.users_id)
+    is_admin = (current_user.role == RoleUser.admin)
+        
+    # 2) ตรวจสอบสิทธิ์การเข้าถึง
+    if is_private and not (is_owner or is_admin):
+        raise HTTPException(status_code=403, detail="Not authorized to access this channel")
 
+    # 3) ดึงรายการไฟล์
+    res = await db.execute(select(File).where(File.channel_id == channel_id))
+    files = res.scalars().all()
+
+    file_list: list[FileDetail] = []
+    for f in files:
+        hashed_file_id = encode_id(f.files_id)
+        file_resp = FileDetail(
+            files_id=hashed_file_id,
+            original_filename=f.original_filename,
+            size_bytes=f.size_bytes,
+            mime=sniff_mime(UPLOAD_ROOT / f.storage_uri),
+            channel_id=channel_id,
+            public_url=f"/static/uploads/{f.storage_uri}" if channel.status == RoleChannel.public else None
+        )
+        file_list.append(file_resp)
+
+    return FileListItem(files=file_list)
+
+@app.post("/files/upload", status_code=201, response_model=FileUploadResponse)
+async def upload_files_only(
+    channel_id: int = Form(...),
+    files: list[UploadFile] = FastAPIFile(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 1) ตรวจสอบว่า channel มีอยู่จริง
+    res = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    channel = res.scalar_one_or_none()
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    isOwner = (channel.created_by == current_user.users_id)
+    
     # 2) ตรวจสิทธิ์เจ้าของ channel
-    if channel.created_by != current_user.users_id:
+    if not isOwner:
         raise HTTPException(status_code=403, detail="Not authorized to upload to this channel")
 
     # 3) จำกัดจำนวนไฟล์ต่อ request
     if len(files) > 10:
         raise HTTPException(status_code=400, detail="Too many files in one request")
 
-    stored_files: list[dict] = []
+    stored_files: list[FileDetail] = []
     created_paths: list[pathlib.Path] = []
 
     try:
@@ -1524,16 +1502,16 @@ async def upload_files_only(
             except Exception as e:
                 print(f"[RAG] failed to index {abs_path}: {e}")
 
-            resp = {
-                "files_id": frow.files_id,
-                "original_filename": frow.original_filename,
-                "size_bytes": size_bytes,
-                "mime": detected_mime,
-                "channel_id": channel_id,
-            }
-            if channel.status == RoleChannel.public:
-                resp["public_url"] = f"/static/uploads/{rel_path}"
-            stored_files.append(resp)
+            hashed_file_id = encode_id(frow.files_id)
+            file_resp = FileDetail(
+                files_id=hashed_file_id,
+                original_filename=frow.original_filename,
+                size_bytes=size_bytes,
+                mime=detected_mime,
+                channel_id=channel_id,
+                public_url=f"/static/uploads/{rel_path}" if channel.status == RoleChannel.public else None
+            )
+            stored_files.append(file_resp)
 
     except Exception:
         for p in created_paths:
@@ -1543,15 +1521,17 @@ async def upload_files_only(
                 pass
         raise
 
-    return {"files": stored_files}
+    return FileUploadResponse(files=stored_files)
 
 
 @app.delete("/files/delete/{file_id}", status_code=204)
 async def delete_file(
-    file_id: int = Path(..., gt=0),
+    file_id: str = Path(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # แปลง hash กลับเป็น file_id
+    file_id = decode_id(file_id)
     # 1. Query แบบ Join เพื่อลดการเรียก DB หลายรอบ
     stmt = (
         select(File)
@@ -1665,13 +1645,13 @@ async def create_session(
     # rag_engine.debug_list_docs_by_channel(new_session.channel_id)
     return new_session
 
-@app.delete("/session/delete/{session_hash}", status_code=204)
+@app.delete("/session/delete/{session_id}", status_code=204)
 async def delete_session(
-    session_hash: str = Path(..., title="The hashed session ID"), # 1. เปลี่ยนรับเป็น String (Hash)
+    session_id: str = Path(..., title="The hashed session ID"), # 1. เปลี่ยนรับเป็น String (Hash)
     db: AsyncSession = Depends(get_db), 
     current_user: User = Depends(get_current_user)
 ):
-    real_session_id = decode_id(session_hash)
+    real_session_id = decode_id(session_id)
     
     result = await db.execute(select(sessions).where(sessions.sessions_id == real_session_id))
     session = result.scalar_one_or_none()
