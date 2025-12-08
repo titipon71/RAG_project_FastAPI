@@ -5,12 +5,14 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import shutil
 from typing import Optional, AsyncGenerator, List
 # from urllib import response
 import uuid, pathlib
 import aiofiles
 from fastapi import Body, FastAPI, APIRouter, Depends, File as FastAPIFile, Form, UploadFile, HTTPException, status, Query, Path , Request, Response
+from fastapi.concurrency import asynccontextmanager
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 # import httpx
 from jose import JWTError, jwt
@@ -449,7 +451,7 @@ async def get_owned_session(
         select(sessions)
         .where(
             sessions.sessions_id == session_id,
-            sessions.user_id == user_id,   # สำคัญ! ต้องเป็นของคนนี้จริง
+            sessions.user_id == user_id,   
         )
     )
     res = await db.execute(stmt)
@@ -462,7 +464,6 @@ async def get_owned_session(
 
 async def call_ai(messages: List[dict], channel_id: int,session_id: int ) -> str:
 
-    # หา user message ตัวท้ายสุด
     last_user_msg = None
     for m in reversed(messages):
         if m["role"] == "user":
@@ -471,7 +472,6 @@ async def call_ai(messages: List[dict], channel_id: int,session_id: int ) -> str
     if last_user_msg is None:
         last_user_msg = "สรุปข้อมูลจากฐานเอกสารให้หน่อย"
 
-    # LlamaIndex เป็น sync → offload ไป thread จะปลอดภัยกว่า
     loop = asyncio.get_running_loop()
     answer = await loop.run_in_executor(None, rag_engine.query, last_user_msg, channel_id, session_id)
     return answer
@@ -488,26 +488,6 @@ async def get_latest_pending_event( db: AsyncSession, channel_id: int) -> Option
     )
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
-
-
-# ============================================================
-#              FILE SAVE / UPLOAD UTILITIES
-# ============================================================
-# ---------- ตัวช่วยเซฟไฟล์แบบ async ----------
-async def _save_upload_to_disk(uf: UploadFile, dst_path: pathlib.Path, max_size: int) -> int:
-    """บันทึก UploadFile ลงดิสก์แบบ async และคืนค่า size (bytes)"""
-    size_counter = 0
-    async with aiofiles.open(dst_path, "wb") as f:
-        while True:
-            chunk = await uf.read(1024 * 1024)
-            if not chunk:
-                break
-            size_counter += len(chunk)
-            if size_counter > max_size:
-                raise HTTPException(status_code=413, detail=f"File too large: {uf.filename}")
-            await f.write(chunk)
-    return size_counter
-
 
 # ============================================================
 #                      Pydantic SCHEMAS
@@ -697,6 +677,7 @@ class FileListItem(BaseModel):
 # ============================================================
 #                  APP INITIALIZATION / MIDDLEWARE
 # ============================================================
+
 app = FastAPI(title="FastAPI + MariaDB + JWT")
 templates = Jinja2Templates(directory="templates")
 
@@ -725,9 +706,7 @@ app.add_middleware(
 # fsd.install(router)
 # app.include_router(router)
 
-@app.on_event("startup")
-async def on_startup():
-    pass
+
 #     # สร้างตารางอัตโนมัติ (เหมาะกับ dev/POC) — โปรดใช้ Alembic ในงานจริง
 #     async with engine.begin() as conn:
 #         await conn.run_sync(Base.metadata.create_all)
@@ -1394,7 +1373,7 @@ async def list_my_channels(
             file_count=len(ch.files),
             files=file_list,
         ))
-        return channel_list
+    return channel_list
 
 @app.get("/channels/list/all/", response_model=List[ChannelListAllItem])
 async def list_all_channels(
