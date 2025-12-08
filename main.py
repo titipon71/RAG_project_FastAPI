@@ -18,7 +18,7 @@ from passlib.context import CryptContext
 from pydantic import BaseModel , EmailStr, field_validator, Field
 from pydantic_settings import BaseSettings
 from sqlalchemy import String, desc, func, select ,Enum as SAEnum, ForeignKey, text
-from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, joinedload, relationship
+from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, joinedload, relationship, selectinload
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
     AsyncSession,
@@ -165,6 +165,8 @@ class Channel(Base):
     )
     
     files = relationship("File", back_populates="channel")
+    creator = relationship("User", back_populates="channels")
+    status_events = relationship("ChannelStatusEvent", back_populates="channel")
     
 class User(Base):
     __tablename__ = "users"
@@ -228,10 +230,12 @@ class User(Base):
         nullable=False,
     )
     
+    channels = relationship("Channel", back_populates="creator")
+    uploaded_files = relationship("File", back_populates="uploader")
 class File(Base):
     __tablename__ = "files"
     files_id: Mapped[int] = mapped_column("files_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
-    uploaded_by: Mapped[Optional[int]] = mapped_column("uploaded_by", MyInt(unsigned=True), nullable=True)
+    uploaded_by: Mapped[Optional[int]] = mapped_column("uploaded_by", MyInt(unsigned=True),ForeignKey("users.users_id"), nullable=True)
     channel_id: Mapped[Optional[int]] = mapped_column("channel_id", MyInt(unsigned=True), ForeignKey("channels.channels_id") , nullable=True)
     original_filename: Mapped[str] = mapped_column("original_filename", String(512), nullable=False)
     storage_uri: Mapped[str] = mapped_column("storage_uri", String(1024), nullable=False)
@@ -239,6 +243,7 @@ class File(Base):
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
     channel = relationship("Channel", back_populates="files")
+    uploader = relationship("User", back_populates="uploaded_files")
 class sessions(Base):
     __tablename__ = "sessions"
     sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
@@ -334,7 +339,9 @@ class ChannelStatusEvent(Base):
         nullable=True,
     )
 
-
+    channel = relationship("Channel", back_populates="status_events")
+    requester = relationship("User", foreign_keys=[requested_by])
+    approver  = relationship("User", foreign_keys=[decided_by])
 # ============================================================
 #                      DB ENGINE & SESSION
 # ============================================================
@@ -544,7 +551,8 @@ class ChannelResponse(BaseModel):
     channels_id: int
     title: str
     description: Optional[str] = None
-    status: str  # หรือเป็น Enum ตาม RoleChannel ของคุณ
+    created_by: int
+    status: RoleChannel  # หรือเป็น Enum ตาม RoleChannel ของคุณ
 
 class ChannelOut(BaseModel):
     channels_id: int
@@ -559,20 +567,26 @@ class ChannelUpdate(BaseModel):
     description: Optional[str] = None
     # status: Optional[RoleChannel] = None
 
-class ChannelListItem(BaseModel):
+class ChannelOneResponse(BaseModel):
     channels_id: int
     title: str
     description: Optional[str] = None
     status: RoleChannel
+    created_by_id: int
+    created_by_name: str
     created_at: datetime
     file_count: int
+    files: List[dict]
 
 class ChannelListPendingItem(BaseModel):
     channels_id: int
     title: str
     description: Optional[str] = None
     status: RoleChannel
+    created_by_id: int
+    created_by_name: str
     created_at: datetime
+    file_count: int
     files: List[dict]
 
 class ChannelListPublicItem(BaseModel):
@@ -580,7 +594,10 @@ class ChannelListPublicItem(BaseModel):
     title: str
     description: Optional[str] = None
     status: RoleChannel
+    created_by_id: int
+    created_by_name: str
     created_at: datetime
+    file_count: int
     files: List[dict] 
 
 class ChannelListAllItem(BaseModel):
@@ -588,8 +605,10 @@ class ChannelListAllItem(BaseModel):
     title: str
     description: Optional[str] = None
     status: RoleChannel
-    created_by: int
+    created_by_id: int
+    created_by_name: str
     created_at: datetime
+    file_count: int
     files: List[dict] 
 
 class ChannelUpdateStatus(BaseModel):
@@ -729,7 +748,6 @@ def healthz_get():
 def healthz_head():
     return Response(status_code=200)
 
-# ถ้ายังอยากให้ HEAD ที่ "/" ใช้ได้ด้วย
 @app.head("/")
 def root_head():
     return Response(status_code=200)
@@ -1057,7 +1075,7 @@ async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db),cur
     await db.delete(channel)
     return {"message": "Channel deleted successfully"}
 
-@app.put("/channels/{channel_id}", response_model=ChannelListItem)
+@app.put("/channels/{channel_id}", response_model=ChannelOneResponse)
 async def update_channel(
     channel_id: int,
     payload: ChannelUpdate,
@@ -1082,7 +1100,7 @@ async def update_channel(
         select(func.count(File.files_id)).where(File.channel_id == channel.channels_id)
     )
     file_count = file_count.scalar() or 0
-    return ChannelListItem(
+    return ChannelOneResponse(
         channels_id=channel.channels_id,
         title=channel.title,
         description=channel.description,
@@ -1188,52 +1206,6 @@ async def moderate_public_request(
         message=final_message,
     )
 
-
-@app.get("/channels/pending/list/", response_model=List[ChannelListPendingItem])
-async def list_pending_channels(
-    search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
-    skip: int = 0,
-    limit: int = 20,
-    db: AsyncSession = Depends(get_db),
-):
-    stmt = (
-        select(Channel)
-        .where(Channel.status == RoleChannel.pending)
-        .order_by(Channel.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-    )
-    if search_by_name:
-        stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
-
-    result = await db.execute(stmt)
-    channels = result.scalars().all()
-
-    channel_list = []
-    for ch in channels:
-        # ดึงรายการไฟล์ในแต่ละ channel
-        file_result = await db.execute(select(File).where(File.channel_id == ch.channels_id))
-        files = file_result.scalars().all()
-        file_list = [
-            {
-                "files_id": f.files_id,
-                "original_filename": f.original_filename,
-                "storage_uri": f.storage_uri,
-                "size_bytes": f.size_bytes,
-                "created_at": f.created_at,
-            }
-            for f in files
-        ]
-        channel_list.append(ChannelListPublicItem(
-            channels_id=ch.channels_id,
-            title=ch.title,
-            description=ch.description,
-            status=ch.status,
-            created_at=ch.created_at,
-            files=file_list,
-        ))
-    return channel_list
-
 @app.put("/channels/status/{channel_id}", response_model=ChannelUpdateStatus)
 async def update_channel_status(
     channel_id: int,
@@ -1258,8 +1230,8 @@ async def update_channel_status(
         status=channel.status,
     )
 
-@app.get("/channels/public/list/", response_model=List[ChannelListPublicItem])
-async def list_public_channels(
+@app.get("/channels/pending/list/", response_model=List[ChannelListPendingItem])
+async def list_pending_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
     limit: int = 20,
@@ -1267,22 +1239,25 @@ async def list_public_channels(
 ):
     stmt = (
         select(Channel)
-        .where(Channel.status == RoleChannel.public)
+        .options(
+            joinedload(Channel.creator), 
+            selectinload(Channel.files) 
+        )
+        .where(Channel.status == RoleChannel.pending)
         .order_by(Channel.created_at.desc())
-        .offset(skip)
-        .limit(limit)
     )
+
     if search_by_name:
         stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
+
+    stmt = stmt.offset(skip).limit(limit)
 
     result = await db.execute(stmt)
     channels = result.scalars().all()
 
     channel_list = []
     for ch in channels:
-        # ดึงรายการไฟล์ในแต่ละ channel
-        file_result = await db.execute(select(File).where(File.channel_id == ch.channels_id))
-        files = file_result.scalars().all()
+        
         file_list = [
             {
                 "files_id": f.files_id,
@@ -1291,20 +1266,85 @@ async def list_public_channels(
                 "size_bytes": f.size_bytes,
                 "created_at": f.created_at,
             }
-            for f in files
+            for f in ch.files #
         ]
+
+        channel_list.append(ChannelListPendingItem(
+            channels_id=ch.channels_id,
+            title=ch.title,
+            description=ch.description,
+            status=ch.status,
+            created_by_id=ch.created_by,
+            created_by_name=ch.creator.username if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
+            created_at=ch.created_at,
+            file_count=len(ch.files),
+            files=file_list,
+        ))
+        
+    return channel_list
+
+
+@app.get("/channels/public/list/", response_model=List[ChannelListPublicItem])
+async def list_public_channels(
+    search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
+    skip: int = 0,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    # 1. สร้าง Base Query พร้อม Eager Load (ดึง User และ Files ทีเดียว)
+    stmt = (
+        select(Channel)
+        .options(
+            joinedload(Channel.creator), # ดึงข้อมูลคนสร้าง (User)
+            selectinload(Channel.files)  # ดึงข้อมูลไฟล์ (Files)
+        )
+        .where(Channel.status == RoleChannel.public)
+        .order_by(Channel.created_at.desc())
+    )
+
+    # 2. ใส่ Filter (Where) ก่อน Pagination
+    if search_by_name:
+        stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
+
+    # 3. ปิดท้ายด้วย Pagination (Offset/Limit)
+    stmt = stmt.offset(skip).limit(limit)
+
+    result = await db.execute(stmt)
+    channels = result.scalars().all()
+
+    # 4. แปลงข้อมูล (ไม่ต้อง Query เพิ่มแล้ว เพราะดึงมาหมดแล้วข้างบน)
+    channel_list = []
+    for ch in channels:
+        
+        # Map ไฟล์จาก memory ได้เลย
+        file_list = [
+            {
+                "files_id": f.files_id,
+                "original_filename": f.original_filename,
+                "storage_uri": f.storage_uri,
+                "size_bytes": f.size_bytes,
+                "created_at": f.created_at,
+                # ถ้า public ควรมี link ให้โหลดได้เลย
+                "public_url": f"/static/uploads/{f.storage_uri}" 
+            }
+            for f in ch.files
+        ]
+
         channel_list.append(ChannelListPublicItem(
             channels_id=ch.channels_id,
             title=ch.title,
             description=ch.description,
             status=ch.status,
+            created_by_id=ch.created_by,
+            created_by_name=ch.creator.username if ch.creator else "Unknown", # ดึงชื่อจาก Relation
             created_at=ch.created_at,
+            file_count=len(ch.files),
             files=file_list,
         ))
 
     return channel_list
 
-@app.get("/channels/list/", response_model=List[ChannelListItem])
+@app.get("/channels/list/", response_model=List[ChannelOneResponse])
 async def list_my_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
@@ -1313,31 +1353,48 @@ async def list_my_channels(
     current_user: User = Depends(get_current_user),
 ):
     stmt = (
-        select(Channel, func.count(File.files_id).label("file_count"))
-        .outerjoin(File, File.channel_id == Channel.channels_id)
-        .where(Channel.created_by == current_user.users_id)
-        .group_by(Channel.channels_id)
+        select(Channel)
+        .options(
+            joinedload(Channel.creator), 
+            selectinload(Channel.files) 
+        )
         .order_by(Channel.created_at.desc())
-        .offset(skip)
-        .limit(limit)
     )
+
     if search_by_name:
         stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
 
-    result = await db.execute(stmt)
-    rows = result.all()
+    stmt = stmt.offset(skip).limit(limit)
 
-    return [
-        ChannelListItem(
+    result = await db.execute(stmt)
+    channels = result.scalars().all()
+
+    channel_list = []
+    for ch in channels:
+        
+        file_list = [
+            {
+                "files_id": f.files_id,
+                "original_filename": f.original_filename,
+                "storage_uri": f.storage_uri,
+                "size_bytes": f.size_bytes,
+                "created_at": f.created_at,
+            }
+            for f in ch.files #
+        ]
+
+        channel_list.append(ChannelOneResponse(
             channels_id=ch.channels_id,
             title=ch.title,
             description=ch.description,
             status=ch.status,
+            created_by_id=ch.created_by,
+            created_by_name=ch.creator.username if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
             created_at=ch.created_at,
-            file_count=file_count or 0,
-        )
-        for ch, file_count in rows
-    ]
+            file_count=len(ch.files),
+            files=file_list,
+        ))
+        return channel_list
 
 @app.get("/channels/list/all/", response_model=List[ChannelListAllItem])
 async def list_all_channels(
@@ -1352,24 +1409,24 @@ async def list_all_channels(
 
     stmt = (
         select(Channel)
-        .outerjoin(File, File.channel_id == Channel.channels_id)
-        .join(User, User.users_id == Channel.created_by)
-        .group_by(Channel.channels_id)
+        .options(
+            joinedload(Channel.creator), 
+            selectinload(Channel.files) 
+        )
         .order_by(Channel.created_at.desc())
-        .offset(skip)
-        .limit(limit)
     )
+
     if search_by_name:
         stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
 
-    result = await db.execute(stmt)
-    channel = result.scalars().all()
+    stmt = stmt.offset(skip).limit(limit)
 
-    channel_list_file = []
-    for ch in channel:
-        # ดึงรายการไฟล์ในแต่ละ channel
-        file_result = await db.execute(select(File).where(File.channel_id == ch.channels_id))
-        files = file_result.scalars().all()
+    result = await db.execute(stmt)
+    channels = result.scalars().all()
+
+    channel_list = []
+    for ch in channels:
+        
         file_list = [
             {
                 "files_id": f.files_id,
@@ -1378,18 +1435,20 @@ async def list_all_channels(
                 "size_bytes": f.size_bytes,
                 "created_at": f.created_at,
             }
-            for f in files
+            for f in ch.files #
         ]
-        channel_list_file.append(ChannelListAllItem(
+
+        channel_list.append(ChannelListPendingItem(
             channels_id=ch.channels_id,
             title=ch.title,
             description=ch.description,
             status=ch.status,
-            created_by=ch.created_by,
+            created_by_id=ch.created_by,
+            created_by_name=ch.creator.username if ch.creator else "Unknown",
             created_at=ch.created_at,
+            file_count=len(ch.files),
             files=file_list,
         ))
-    return channel_list_file
 
 
 # ============================================================
@@ -1611,29 +1670,6 @@ async def create_session(
         if channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
             raise HTTPException(status_code=403, detail="Not authorized to access this channel")
 
-    # 3) (ทางเลือก) ถ้าไม่อยากให้สร้างซ้ำรัว ๆ ให้เช็คก่อนว่ามีล่าสุดแล้วหรือยัง
-    #    ถ้าอยากให้สร้างได้กี่รอบก็ได้ ข้ามบล็อกนี้ไปได้
-    # last_sess_stmt = (
-    #     select(sessions)
-    #     .where(
-    #         sessions.channel_id == payload.channel_id,
-    #         sessions.user_id == current_user.users_id,
-    #     )
-    #     .order_by(sessions.created_at.desc())
-    #     .limit(1)
-    # )
-    # last_sess_res = await db.execute(last_sess_stmt)
-    # last_sess = last_sess_res.scalar_one_or_none()
-    # if last_sess:
-    #     # ถ้าจะ reuse session เดิม ก็ return ตัวเก่าเลย
-    #     return {
-    #         "session_id": last_sess.sessions_id,
-    #         "channel_id": last_sess.channel_id,
-    #         "user_id": last_sess.user_id,
-    #         "created_at": last_sess.created_at,
-    #         "reused": True,
-    #     }
-
     # 4) สร้าง session ใหม่
     new_session = sessions(
         channel_id=payload.channel_id,
@@ -1670,6 +1706,7 @@ async def delete_session(
     rag_engine.clear_session_history(session.sessions_id) 
     
     return
+
 
 
 # ============================================================
