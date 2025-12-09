@@ -757,15 +757,12 @@ async def register_user(payload: UserCreate, db: AsyncSession = Depends(get_db))
         username=payload.username,
         name=payload.name,
         hashed_password=payload.password,
-        email=payload.email,        # ใส่ได้หรือไม่ใส่ก็ได้ตาม schema
-        # role ไม่ต้องส่ง → DB ใส่ default 'user' ให้เอง
+        email=payload.email,        
     )
     db.add(user)
     try:
-        # ดัน INSERT ออกไปตอนนี้เลย เพื่อให้รู้ว่าซ้ำหรือไม่
         await db.flush()
     except IntegrityError:
-        # ไม่ต้อง rollback เอง ปล่อยให้ dependency จัดการเพราะมี exception เด้งออกอยู่แล้ว
         raise HTTPException(status_code=409, detail="Name or email already exists")
 
     # โหลดค่าที่ DB เติมให้ (เช่น id/created_at/role default)
@@ -1331,12 +1328,14 @@ async def list_my_channels(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    
     stmt = (
         select(Channel)
         .options(
             joinedload(Channel.creator), 
             selectinload(Channel.files) 
         )
+        .where(Channel.created_by == current_user.users_id)
         .order_by(Channel.created_at.desc())
     )
 
@@ -1428,7 +1427,7 @@ async def list_all_channels(
             file_count=len(ch.files),
             files=file_list,
         ))
-
+    return channel_list
 
 # ============================================================
 #                  FILE ROUTES
