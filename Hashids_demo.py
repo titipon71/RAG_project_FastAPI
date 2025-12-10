@@ -17,7 +17,7 @@ print(f"Salt: {salt}")
 print(f"Min Length: {min_length}")
 print("-" * 40)
 
-id = 8
+id = 3
 encoded_id = hashids.encode(id)
 print(f"User ID: {id} -> Encoded: {encoded_id}")
 print(f"Encoded: {encoded_id} -> Decoded User ID: {hashids.decode(encoded_id)[0]}")

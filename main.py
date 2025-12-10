@@ -757,6 +757,28 @@ class FileUploadResponse(BaseModel):
 class FileListItem(BaseModel):
     files: list[FileDetail]
 
+class UserRequestChannelStatusEventResponse(BaseModel):
+    event_id: int
+    channel_id: str
+    old_status: RoleChannel
+    new_status: RoleChannel
+    requested_by: int
+    
+    # เพิ่ม field เหล่านี้ให้ครบตามที่คุณพยายาม assign ด้านล่าง
+    # ควรใส่เป็น Optional เพราะ event ที่เพิ่งสร้างอาจยังไม่มีผลการตัดสิน
+    decided_by: Optional[int] = None 
+    decision: Optional[str] = None   # หรือเป็น Enum ถ้ามี
+    decision_reason: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    
+    created_at: datetime
+
+    @field_validator('channel_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v) # สมมติว่ามีฟังก์ชันนี้
+        return v
+
 # ============================================================
 #                  APP INITIALIZATION / MIDDLEWARE
 # ============================================================
@@ -814,6 +836,47 @@ def healthz_head():
 def root_head():
     return Response(status_code=200)
 
+@app.get("/hashids-demo", response_class=HTMLResponse)
+async def read_root(request: Request):
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "salt_preview": settings.HASH_SALT[:3] + "***"
+    })
+
+# 3. POST Route: รวม Logic ทั้ง Encode และ Decode
+@app.post("/hashids-demo", response_class=HTMLResponse)
+async def process_hashids(
+    request: Request,
+    action: str = Form(...),              # ตัวบอกว่ากดปุ่มไหน (encode หรือ decode)
+    number_input: Optional[int] = Form(None), # รับค่าตัวเลข (ถ้ามี)
+    hash_input: Optional[str] = Form(None)    # รับค่า Hash (ถ้ามี)
+):
+    result_encode = None
+    result_decode = None
+    error_msg = None
+
+    # Logic: ตรวจสอบว่า action คืออะไร
+    if action == "encode" and number_input is not None:
+        result_encode = hasher.encode(number_input)
+        
+    elif action == "decode" and hash_input:
+        decoded = hasher.decode(hash_input)
+        if decoded:
+            result_decode = decoded[0]
+        else:
+            error_msg = "ไม่สามารถถอดรหัสได้ (Invalid Hash)"
+
+    # ส่งค่ากลับไปที่ template เดิม
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "salt_preview": settings.HASH_SALT[:3] + "***",
+        "action": action,             # ส่งกลับไปเพื่อเช็คว่าเพิ่งทำอะไรเสร็จ
+        "number_input": number_input, # ส่งค่าเดิมกลับไปแสดงในช่อง
+        "hash_input": hash_input,     # ส่งค่าเดิมกลับไปแสดงในช่อง
+        "result_encode": result_encode,
+        "result_decode": result_decode,
+        "error_msg": error_msg
+    })
 
 # ============================================================
 #                  AUTH ROUTES
@@ -1208,11 +1271,74 @@ async def request_make_public(
     await db.refresh(event)
 
     return ModerationResponse(
-        channel_id=channel.channels_id,
+        channels_id=channel.channels_id,
         old_status=old_status,
         current_status=channel.status,
         event_id=event.event_id,
         message="Request submitted. Waiting for admin approval."
+    )
+
+@app.post("/channels/{channel_id}/cancel-request", response_model=ModerationResponse, status_code=201)
+async def cancel_request_make_public(
+    channel_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 1) Decode และตรวจสอบ ID
+    decoded_channel_id = decode_id(channel_id)
+    if decoded_channel_id is None:
+        raise HTTPException(status_code=404, detail="Invalid Channel ID")
+
+    # 2) โหลด channel
+    res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
+    channel = res.scalar_one_or_none()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    # 3) ต้องเป็นเจ้าของเท่านั้น
+    if channel.created_by != current_user.users_id:
+        raise HTTPException(status_code=403, detail="Only owner can request")
+
+    # 4) ยกเลิกได้เฉพาะเมื่อสถานะเป็น pending เท่านั้น
+    if channel.status == RoleChannel.public:
+        raise HTTPException(status_code=400, detail="Channel is already public")
+    if channel.status == RoleChannel.private:
+        raise HTTPException(status_code=409, detail="Channel is already private (no request to cancel)")
+
+    # --- เก็บสถานะเดิม (Pending) ---
+    old_status = channel.status
+    
+    # --- [FIXED] เปลี่ยนสถานะกลับเป็น Private ---
+    channel.status = RoleChannel.private
+
+    # 5) สร้าง event (Auto-resolved)
+    # เราบันทึกว่ามีการเปลี่ยนกลับเป็น private แต่ใส่ข้อมูลว่า approved แล้ว (โดยตัว user เอง)
+    # เพื่อไม่ให้ไปค้างในรายการรออนุมัติของ Admin
+    now = datetime.now(timezone.utc)
+    event = ChannelStatusEvent(
+        channel_id=channel.channels_id,
+        old_status=old_status,
+        new_status=RoleChannel.private,
+        requested_by=current_user.users_id,
+        
+        # [IMPROVED] บันทึกว่าตัดสินใจแล้วทันที ไม่ต้องรอ Admin
+        decided_by=current_user.users_id, 
+        decision=ModerationDecision.approved, # อนุมัติให้กลับเป็น private
+        decision_reason="User cancelled the public request",
+        decided_at=now
+    )
+    
+    db.add(event)
+    await db.flush()
+    await db.refresh(channel)
+    await db.refresh(event)
+
+    return ModerationResponse(
+        channels_id=channel.channels_id,
+        old_status=old_status,
+        current_status=channel.status,
+        event_id=event.event_id,
+        message="Request cancelled. Channel reverted to private."
     )
 
 @app.post("/channels/{channel_id}/moderate-public", response_model=AdminDecisionOut)
@@ -1390,7 +1516,8 @@ async def admin_forced_this_channel_to_be_private(
         message=reason,
     )
 
-@app.post("/channels/{channel_id}/owner-set-private", response_model=ModerationResponse)
+
+@app.post("/channels/{channels_id}/owner-set-private", response_model=ModerationResponse)
 async def owner_set_this_channel_private(
     channels_id: str,
     db: AsyncSession = Depends(get_db),
@@ -1432,7 +1559,7 @@ async def owner_set_this_channel_private(
     await db.refresh(event)
 
     return ModerationResponse(
-        channel_id=channel.channels_id,
+        channels_id=channel.channels_id,
         old_status=old_status,
         current_status=channel.status,
         event_id=event.event_id,
@@ -2061,6 +2188,51 @@ async def get_chat_history(session_id: str = Path(..., gt=0),
         ))
 
     return history
+
+# ============================================================
+#                 EVENT ROUTES
+# ============================================================
+@app.get("/events/request/{user_id}", response_model=List[UserRequestChannelStatusEventResponse])
+async def get_channel_status_events_by_user(
+    user_id: str = Path(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    real_user_id = decode_id(user_id)
+    if real_user_id is None:
+        raise HTTPException(status_code=404, detail="Invalid User ID")
+
+    # 1) ตรวจสอบสิทธิ์: ต้องเป็น admin หรือ เจ้าของ user_id เท่านั้น
+    if current_user.role != RoleUser.admin and current_user.users_id != real_user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to view these events")
+
+    # 2) ดึง events
+    result = await db.execute(
+        select(ChannelStatusEvent)
+        .where(ChannelStatusEvent.requested_by == real_user_id)
+        .order_by(ChannelStatusEvent.created_at.desc())
+    )
+    events = result.scalars().all()
+
+    # 3) แปลงข้อมูลและส่งกลับ (Mapping)
+    event_list = []
+    for ev in events:
+        # สร้าง Object response
+        response_item = UserRequestChannelStatusEventResponse(
+            event_id=ev.event_id,
+            channel_id=ev.channel_id, # ตรงนี้ Validator จะทำงานแปลง int -> encoded str ให้
+            old_status=ev.old_status,
+            new_status=ev.new_status,
+            requested_by=ev.requested_by,
+            decided_by=ev.decided_by,
+            decision=ev.decision,
+            decision_reason=ev.decision_reason,
+            created_at=ev.created_at,
+            decided_at=ev.decided_at,
+        )
+        event_list.append(response_item)
+    
+    return event_list
 
 
 # ============================================================
