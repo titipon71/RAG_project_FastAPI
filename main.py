@@ -166,9 +166,9 @@ class Channel(Base):
         nullable=False,
     )
     
-    files = relationship("File", back_populates="channel")
+    files = relationship("File", back_populates="channel",cascade="all, delete-orphan")
     creator = relationship("User", back_populates="channels")
-    status_events = relationship("ChannelStatusEvent", back_populates="channel")
+    status_events = relationship("ChannelStatusEvent", back_populates="channel",cascade="all, delete-orphan")
     
 class User(Base):
     __tablename__ = "users"
@@ -238,7 +238,7 @@ class File(Base):
     __tablename__ = "files"
     files_id: Mapped[int] = mapped_column("files_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
     uploaded_by: Mapped[Optional[int]] = mapped_column("uploaded_by", MyInt(unsigned=True),ForeignKey("users.users_id"), nullable=True)
-    channel_id: Mapped[Optional[int]] = mapped_column("channel_id", MyInt(unsigned=True), ForeignKey("channels.channels_id") , nullable=True)
+    channel_id: Mapped[Optional[int]] = mapped_column("channel_id", MyInt(unsigned=True), ForeignKey("channels.channels_id") , nullable=False)
     original_filename: Mapped[str] = mapped_column("original_filename", String(512), nullable=False)
     storage_uri: Mapped[str] = mapped_column("storage_uri", String(1024), nullable=False)
     size_bytes: Mapped[Optional[int]] = mapped_column("size_bytes", MyInt(unsigned=True), nullable=True)
@@ -528,27 +528,43 @@ class ChannelCreate(BaseModel):
     description: Optional[str] = None
 
 class ChannelResponse(BaseModel):
-    channels_id: int
+    channels_id: str
     title: str
     description: Optional[str] = None
     created_by: int
-    status: RoleChannel  # หรือเป็น Enum ตาม RoleChannel ของคุณ
+    status: RoleChannel
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
 
 class ChannelOut(BaseModel):
-    channels_id: int
+    channels_id: str
     title: str
     description: Optional[str]
     status: RoleChannel
     created_at: datetime
-    files: List[dict]  # รายการไฟล์ใน channel นี้
+    files: List[dict] 
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
 
 class ChannelUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     # status: Optional[RoleChannel] = None
 
+class ChannelUpdateResponse(BaseModel):
+    title: str
+    description: Optional[str] = None
+    
 class ChannelOneResponse(BaseModel):
-    channels_id: int
+    channels_id: str
     title: str
     description: Optional[str] = None
     status: RoleChannel
@@ -557,9 +573,15 @@ class ChannelOneResponse(BaseModel):
     created_at: datetime
     file_count: int
     files: List[dict]
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
 
 class ChannelListPendingItem(BaseModel):
-    channels_id: int
+    channels_id: str
     title: str
     description: Optional[str] = None
     status: RoleChannel
@@ -568,9 +590,15 @@ class ChannelListPendingItem(BaseModel):
     created_at: datetime
     file_count: int
     files: List[dict]
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
 
 class ChannelListPublicItem(BaseModel):
-    channels_id: int
+    channels_id: str
     title: str
     description: Optional[str] = None
     status: RoleChannel
@@ -579,9 +607,15 @@ class ChannelListPublicItem(BaseModel):
     created_at: datetime
     file_count: int
     files: List[dict] 
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
 
 class ChannelListAllItem(BaseModel):
-    channels_id: int
+    channels_id: str
     title: str
     description: Optional[str] = None
     status: RoleChannel
@@ -591,28 +625,55 @@ class ChannelListAllItem(BaseModel):
     file_count: int
     files: List[dict] 
 
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
+
 class ChannelUpdateStatus(BaseModel):
-    channels_id: int
+    channels_id: str
     status: RoleChannel
 
 class sessionCreate(BaseModel):
-    channel_id: int
+    channel_id: str
+    
+    @field_validator('channel_id', mode='before')
+    def decode_channel_id(cls, v):
+        if isinstance(v, str):
+            decoded = decode_id(v)
+            if decoded is None:
+                raise ValueError("Invalid Channel ID")
+            return decoded
+        return v
 
 class chatCreate(BaseModel):
-    channels_id: int
+    channels_id: str
     users_id: int
     sessions_id: int
     message: str
     sender_type: RoleSender
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
 
 class chatHistoryItem(BaseModel):
     chat_id: int
-    channels_id: int
+    channels_id: str
     users_id: int
     sessions_id: int
     message: str
     sender_type: RoleSender
     created_at: datetime
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
 
 class ChatRequest(BaseModel):
     sessions_id: str
@@ -628,18 +689,24 @@ class ChatRequest(BaseModel):
         return v 
 
 class ModerationResponse(BaseModel):
-    channel_id: int
+    channels_id: str
     old_status: RoleChannel
     current_status: RoleChannel
     event_id: int
     message: str
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
     
 class AdminDecisionIn(BaseModel):
     approve: bool
     reason: Optional[str] = None
 
 class AdminDecisionOut(BaseModel):
-    channels_id: int
+    channels_id: str
     decision: ModerationDecision
     status_after: RoleChannel
     event_id: int
@@ -647,10 +714,15 @@ class AdminDecisionOut(BaseModel):
     decided_at: datetime
     message: str
 
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
     
 class SessionResponse(BaseModel):
     sessions_id: str  = Field(..., validation_alias="sessions_id")
-    channel_id: int
+    channel_id: str
     user_id: int
     created_at: datetime
     
@@ -660,6 +732,11 @@ class SessionResponse(BaseModel):
             return encode_id(v) 
         return v    
 
+    @field_validator('channel_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
 class FileDetail(BaseModel):
     files_id: str = Field(..., description="Hashed ID ของไฟล์")
     original_filename: str = Field(..., description="ชื่อไฟล์เดิม")
@@ -667,6 +744,12 @@ class FileDetail(BaseModel):
     mime: str = Field(..., description="ชนิดไฟล์ (MIME type)")
     channel_id: int = Field(..., description="ID ของ Channel ที่อัปโหลด")
     public_url: Optional[str] = Field(None, description="URL สำหรับเข้าถึงไฟล์ (มีเฉพาะกรณี public channel)")
+    
+    @field_validator('channel_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int):
+            return encode_id(v)
+        return v
 
 class FileUploadResponse(BaseModel):
     files: list[FileDetail]
@@ -968,12 +1051,14 @@ async def create_channel(
 
 @app.get("/channels/{channel_id}", response_model=ChannelOut)
 async def get_channel_details(
-    channel_id: int, 
+    channel_id: str, 
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
     ):
     
-    result = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    decoded_channel_id = decode_id(channel_id)
+
+    result = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
     channel = result.scalar_one_or_none()
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -1013,10 +1098,11 @@ async def get_channel_details(
 
 
 @app.delete("/channels/{channel_id}")
-async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db),current_user: User = Depends(get_current_user)):
+async def delete_channel(channel_id: str, db: AsyncSession = Depends(get_db),current_user: User = Depends(get_current_user)):
+    decoded_channel_id = decode_id(channel_id)
     # ดึง channel ตาม id
     result = await db.execute(
-        select(Channel).where(Channel.channels_id == channel_id)
+        select(Channel).where(Channel.channels_id == decoded_channel_id)
     )
     channel = result.scalar_one_or_none()
 
@@ -1051,48 +1137,46 @@ async def delete_channel(channel_id: int, db: AsyncSession = Depends(get_db),cur
     await db.delete(channel)
     return {"message": "Channel deleted successfully"}
 
-@app.put("/channels/{channel_id}", response_model=ChannelOneResponse)
+@app.put("/channels/{channel_id}", response_model=ChannelUpdateResponse)
 async def update_channel(
-    channel_id: int,
+    channel_id: str,
     payload: ChannelUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
-    channel = result.scalar_one_or_none()
-    if channel is None:
+    decoded_channel_id = decode_id(channel_id)
+    stmt = select(Channel).where(Channel.channels_id == decoded_channel_id)
+    result = await db.execute(stmt)
+    
+    channels = result.scalars().one_or_none() 
+
+    if channels is None:
         raise HTTPException(status_code=404, detail="Channel not found")
-    # เฉพาะ admin หรือเจ้าของเท่านั้นที่แก้ไขได้
-    if current_user.role != RoleUser.admin and channel.created_by != current_user.users_id:
-        raise HTTPException(status_code=403, detail="Not authorized to edit this channel")
-    if payload.title is not None:
-        channel.title = payload.title
-    if payload.description is not None:
-        channel.description = payload.description
-    await db.flush()
-    await db.refresh(channel)
-    # นับจำนวนไฟล์ใน channel
-    file_count = await db.execute(
-        select(func.count(File.files_id)).where(File.channel_id == channel.channels_id)
-    )
-    file_count = file_count.scalar() or 0
-    return ChannelOneResponse(
-        channels_id=channel.channels_id,
-        title=channel.title,
-        description=channel.description,
-        status=channel.status,
-        created_at=channel.created_at,
-        file_count=file_count,
-    )
+    
+    isNotOwner = channels.created_by != current_user.users_id
+    isNotAdmin = current_user.role != RoleUser.admin
+    
+    if isNotOwner and isNotAdmin:
+        raise HTTPException(status_code=403, detail="Only owner or admin can update channel")
+
+    channels.title = payload.title
+    channels.description = payload.description
+
+    await db.flush() 
+    
+    await db.refresh(channels)
+    
+    return channels
 
 @app.post("/channels/{channel_id}/request-public", response_model=ModerationResponse, status_code=201)
 async def request_make_public(
-    channel_id: int,
+    channel_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     # 1) โหลด channel
-    res = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    decoded_channel_id = decode_id(channel_id)
+    res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
     channel = res.scalar_one_or_none()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -1132,8 +1216,8 @@ async def request_make_public(
     )
 
 @app.post("/channels/{channel_id}/moderate-public", response_model=AdminDecisionOut)
-async def moderate_public_request(
-    channel_id: int,
+async def approved_rejected_public_request(
+    channel_id: str,
     payload: AdminDecisionIn,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -1141,7 +1225,8 @@ async def moderate_public_request(
     if current_user.role != RoleUser.admin:
         raise HTTPException(status_code=403, detail="Admin only")
     
-    res = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    decoded_channel_id = decode_id(channel_id)
+    res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
     channel = res.scalar_one_or_none()
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -1182,29 +1267,201 @@ async def moderate_public_request(
         message=final_message,
     )
 
-@app.put("/channels/status/{channel_id}", response_model=ChannelUpdateStatus)
-async def update_channel_status(
-    channel_id: int,
-    new_status: RoleChannel = Body(..., embed=True),
+@app.post("/channels/{channel_id}/admin-forced-public", response_model=AdminDecisionOut)
+async def admin_forced_this_channel_to_be_public(
+    channel_id: str,
+    payload: AdminDecisionIn,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
-    channel = result.scalar_one_or_none()
-    if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    # เฉพาะ admin เท่านั้นที่แก้ไขได้
+    # 1. Check Admin Permission
     if current_user.role != RoleUser.admin:
         raise HTTPException(status_code=403, detail="Admin only")
     
-    channel.status = new_status
+    # 2. Get Channel
+    real_channel_id = decode_id(channel_id)
+    if real_channel_id is None:
+        raise HTTPException(status_code=404, detail="Invalid Channel ID")
+    res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
+    channel = res.scalar_one_or_none()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    # 3. Validation: ทำได้เฉพาะช่องที่เป็น Public หรือ Pending เท่านั้น
+    if channel.status != RoleChannel.private and channel.status != RoleChannel.pending:
+        raise HTTPException(status_code=400, detail="Channel is already private")
+
+    # เก็บสถานะเดิมไว้ทำ Log
+    old_status = channel.status
+    now = datetime.now(timezone.utc)
+    reason = payload.reason or "Admin forced channel to PUBLIC."
+
+    # 4. Action: เปลี่ยนสถานะเป็น Public
+    channel.status = RoleChannel.public
+    
+    # 5. Create NEW Event Log
+    # เราสร้าง Event ใหม่เลย เพราะนี่คือการกระทำใหม่จาก Admin (ไม่ใช่การอนุมัติคำขอเก่า)
+    event = ChannelStatusEvent(
+        channel_id=channel.channels_id,
+        old_status=old_status,
+        new_status=RoleChannel.public,
+        requested_by=current_user.users_id, # Admin เป็นคนเริ่ม
+        decided_by=current_user.users_id,   # Admin เป็นคนตัดสิน
+        decision=ModerationDecision.approved,
+        decision_reason=reason,
+        created_at=now,
+        decided_at=now
+    )
+
+    db.add(event)
     await db.flush()
     await db.refresh(channel)
-    
-    return ChannelUpdateStatus(
+    await db.refresh(event)
+
+    return AdminDecisionOut(
         channels_id=channel.channels_id,
-        status=channel.status,
+        decision=event.decision,
+        status_after=channel.status,
+        event_id=event.event_id,
+        decided_by=event.decided_by,
+        decided_at=event.decided_at,
+        message=reason,
     )
+
+@app.post("/channels/{channel_id}/admin-forced-private", response_model=AdminDecisionOut)
+async def admin_forced_this_channel_to_be_private(
+    channel_id: str,
+    payload: AdminDecisionIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    real_channel_id = decode_id(channel_id)
+    if real_channel_id is None:
+        raise HTTPException(status_code=404, detail="Invalid Channel ID")
+    
+    # 1. Check Admin Permission
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    
+    # 2. Get Channel
+    res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
+    channel = res.scalar_one_or_none()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    # 3. Validation: ทำได้เฉพาะช่องที่เป็น Public หรือ Pending เท่านั้น
+    if channel.status != RoleChannel.public and channel.status != RoleChannel.pending:
+        raise HTTPException(status_code=400, detail="Channel is already private")
+
+    # เก็บสถานะเดิมไว้ทำ Log
+    old_status = channel.status
+    now = datetime.now(timezone.utc)
+    reason = payload.reason or "Admin forced channel to PRIVATE."
+
+    # 4. Action: เปลี่ยนสถานะเป็น Private
+    channel.status = RoleChannel.private
+    
+    # 5. Create NEW Event Log
+    # เราสร้าง Event ใหม่เลย เพราะนี่คือการกระทำใหม่จาก Admin (ไม่ใช่การอนุมัติคำขอเก่า)
+    event = ChannelStatusEvent(
+        channel_id=channel.channels_id,
+        old_status=old_status,
+        new_status=RoleChannel.private,
+        requested_by=current_user.users_id, # Admin เป็นคนเริ่ม
+        decided_by=current_user.users_id,   # Admin เป็นคนตัดสิน
+        decision=ModerationDecision.approved,
+        decision_reason=reason,
+        created_at=now,
+        decided_at=now
+    )
+
+    db.add(event)
+    await db.flush()
+    await db.refresh(channel)
+    await db.refresh(event)
+
+    return AdminDecisionOut(
+        channels_id=channel.channels_id,
+        decision=event.decision,
+        status_after=channel.status,
+        event_id=event.event_id,
+        decided_by=event.decided_by,
+        decided_at=event.decided_at,
+        message=reason,
+    )
+
+@app.post("/channels/{channel_id}/owner-set-private", response_model=ModerationResponse)
+async def owner_set_this_channel_private(
+    channels_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 1. ค้นหา Channel
+    decoded_channel_id = decode_id(channels_id)
+    res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
+    channel = res.scalar_one_or_none()
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    # 2. ตรวจสอบสิทธิ์: ต้องเป็นเจ้าของ Channel หรือ Admin เท่านั้น
+    if channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="Only owner can set channel to private")
+
+    # 3. ตรวจสอบสถานะปัจจุบัน: ถ้าเป็น private อยู่แล้วไม่ต้องทำอะไร
+    if channel.status == RoleChannel.private:
+        raise HTTPException(status_code=400, detail="Channel is already private")
+
+    old_status = channel.status
+    channel.status = RoleChannel.private
+
+    # 4. บันทึกประวัติการเปลี่ยนสถานะใน ChannelStatusEvent
+    event = ChannelStatusEvent(
+        channel_id=channel.channels_id,
+        old_status=old_status,
+        new_status=RoleChannel.private,
+        requested_by=current_user.users_id,
+        decided_by=current_user.users_id,
+        decision=ModerationDecision.approved, # ถือว่าอนุมัติทันทีโดยเจ้าของ
+        decision_reason="Changed to private by owner",
+        decided_at=datetime.now(timezone.utc)
+    )
+    db.add(event)
+    
+    await db.flush()
+    await db.refresh(channel)
+    await db.refresh(event)
+
+    return ModerationResponse(
+        channel_id=channel.channels_id,
+        old_status=old_status,
+        current_status=channel.status,
+        event_id=event.event_id,
+        message="Channel is now private."
+    )
+
+# @app.put("/channels/admin/debug/force-status", response_model=ChannelUpdateStatus)
+# async def update_channel_status(
+#     channel_id: int,
+#     new_status: RoleChannel = Body(..., embed=True),
+#     db: AsyncSession = Depends(get_db),
+#     current_user: User = Depends(get_current_user),
+# ):
+#     result = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+#     channel = result.scalar_one_or_none()
+#     if channel is None:
+#         raise HTTPException(status_code=404, detail="Channel not found")
+#     # เฉพาะ admin เท่านั้นที่แก้ไขได้
+#     if current_user.role != RoleUser.admin:
+#         raise HTTPException(status_code=403, detail="Admin only")
+    
+#     channel.status = new_status
+#     await db.flush()
+#     await db.refresh(channel)
+    
+#     return ChannelUpdateStatus(
+#         channels_id=channel.channels_id,
+#         status=channel.status,
+#     )
 
 @app.get("/channels/pending/list/", response_model=List[ChannelListPendingItem])
 async def list_pending_channels(
@@ -1434,12 +1691,16 @@ async def list_all_channels(
 # ============================================================
 @app.get("/files/list/{channel_id}", response_model=FileListItem)
 async def list_files_in_channel(
-    channel_id: int = Path(...),
+    channel_id: str = Path(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    real_channel_id = decode_id(channel_id)
+    if real_channel_id is None:
+         raise HTTPException(status_code=404, detail="Invalid Channel ID")
+     
     # 1) ตรวจสอบว่า channel มีอยู่จริง
-    res = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
     channel = res.scalar_one_or_none()
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -1473,13 +1734,17 @@ async def list_files_in_channel(
 
 @app.post("/files/upload", status_code=201, response_model=FileUploadResponse)
 async def upload_files_only(
-    channel_id: int = Form(...),
+    channel_id: str = Form(...),
     files: list[UploadFile] = FastAPIFile(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    real_channel_id = decode_id(channel_id)
+    if real_channel_id is None:
+        raise HTTPException(status_code=404, detail="Invalid Channel ID")
+    
     # 1) ตรวจสอบว่า channel มีอยู่จริง
-    res = await db.execute(select(Channel).where(Channel.channels_id == channel_id))
+    res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
     channel = res.scalar_one_or_none()
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -1700,7 +1965,7 @@ async def Talking_with_Ollama_from_document(
     sess_stmt = (
         select(sessions)
         .where(
-            sessions.sessions_id == payload.session_id,
+            sessions.sessions_id == payload.sessions_id,
             sessions.user_id == current_user.users_id,
         )
     )
@@ -1761,12 +2026,16 @@ async def Talking_with_Ollama_from_document(
 
 
 @app.get("/sessions/{session_id}/history", response_model=List[chatHistoryItem])
-async def get_chat_history(session_id: int = Path(..., gt=0),
+async def get_chat_history(session_id: str = Path(..., gt=0),
                            db: AsyncSession = Depends(get_db),
                            current_user: User = Depends(get_current_user)
                            ):
+    real_session_id = decode_id(session_id)
+    if real_session_id is None:
+         raise HTTPException(status_code=404, detail="Invalid Session ID")
+     
     # 1) ตรวจว่า session นี้เป็นของ user นี้จริงไหม
-    owned_sess = await get_owned_session(db, session_id, current_user.users_id)
+    owned_sess = await get_owned_session(db, real_session_id, current_user.users_id)
     if owned_sess is None:
         # ไม่ใช่ของเขา หรือไม่มีอยู่
         raise HTTPException(status_code=403, detail="Not your session")
