@@ -9,85 +9,451 @@
     integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+  <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
   <style>
-    @import url("https://fonts.googleapis.com/css2?family=Mali:ital,wght@0,200;0,300;0,400;0,500;0,600;0,700;1,200;1,300;1,400;1,500;1,600;1,700&display=swap");
-
     * {
-      font-family: "Mali", sans-serif;
+      font-family: "Kanit", sans-serif;
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
     }
 
     body {
-      /* ไล่ระดับสีพื้นหลัง */
-      background: linear-gradient(135deg, #f50d28, #6610f2);
+      background: linear-gradient(-45deg, #0f0c29, #302b63, #24243e, #1a1a2e);
+      background-size: 400% 400%;
+      animation: gradientBG 15s ease infinite;
       min-height: 100vh;
       display: flex;
       justify-content: center;
       align-items: center;
-      font-family: "Prompt", sans-serif;
       color: white;
-      margin: 0;
+      overflow: hidden;
+      position: relative;
     }
 
+    @keyframes gradientBG {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+
+    /* Floating Particles */
+    .particles {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      overflow: hidden;
+      z-index: 0;
+    }
+
+    .particle {
+      position: absolute;
+      border-radius: 50%;
+      animation: floatUp 20s infinite;
+      opacity: 0.6;
+    }
+
+    .particle:nth-child(1) { left: 5%; width: 15px; height: 15px; background: rgba(245, 13, 40, 0.4); animation-delay: 0s; animation-duration: 25s; }
+    .particle:nth-child(2) { left: 15%; width: 10px; height: 10px; background: rgba(102, 16, 242, 0.5); animation-delay: 2s; animation-duration: 20s; }
+    .particle:nth-child(3) { left: 25%; width: 20px; height: 20px; background: rgba(255, 255, 255, 0.2); animation-delay: 4s; animation-duration: 28s; }
+    .particle:nth-child(4) { left: 35%; width: 8px; height: 8px; background: rgba(245, 13, 40, 0.5); animation-delay: 1s; animation-duration: 22s; }
+    .particle:nth-child(5) { left: 45%; width: 12px; height: 12px; background: rgba(102, 16, 242, 0.4); animation-delay: 3s; animation-duration: 18s; }
+    .particle:nth-child(6) { left: 55%; width: 18px; height: 18px; background: rgba(255, 255, 255, 0.15); animation-delay: 5s; animation-duration: 30s; }
+    .particle:nth-child(7) { left: 65%; width: 6px; height: 6px; background: rgba(245, 13, 40, 0.6); animation-delay: 2s; animation-duration: 24s; }
+    .particle:nth-child(8) { left: 75%; width: 14px; height: 14px; background: rgba(102, 16, 242, 0.3); animation-delay: 4s; animation-duration: 19s; }
+    .particle:nth-child(9) { left: 85%; width: 10px; height: 10px; background: rgba(255, 255, 255, 0.25); animation-delay: 1s; animation-duration: 26s; }
+    .particle:nth-child(10) { left: 95%; width: 16px; height: 16px; background: rgba(245, 13, 40, 0.35); animation-delay: 3s; animation-duration: 21s; }
+
+    @keyframes floatUp {
+      0% {
+        transform: translateY(100vh) rotate(0deg);
+        opacity: 0;
+      }
+      10% {
+        opacity: 0.6;
+      }
+      90% {
+        opacity: 0.6;
+      }
+      100% {
+        transform: translateY(-100vh) rotate(720deg);
+        opacity: 0;
+      }
+    }
+
+    /* Glowing Orbs */
+    .glow-orb {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(80px);
+      z-index: 0;
+      animation: pulse 8s ease-in-out infinite;
+    }
+
+    .glow-orb-1 {
+      width: 400px;
+      height: 400px;
+      background: rgba(245, 13, 40, 0.3);
+      top: -100px;
+      left: -100px;
+    }
+
+    .glow-orb-2 {
+      width: 500px;
+      height: 500px;
+      background: rgba(102, 16, 242, 0.25);
+      bottom: -150px;
+      right: -150px;
+      animation-delay: 4s;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 0.5; }
+      50% { transform: scale(1.2); opacity: 0.8; }
+    }
+
+    /* Welcome Box */
     .welcome-box {
       text-align: center;
-      background: rgba(0, 0, 0, 0.508);
-      padding: 3rem;
-      border-radius: 20px;
-      backdrop-filter: blur(8px);
-      box-shadow: 0 0 25px rgba(0, 0, 0, 0.2);
+      background: rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      padding: 3.5rem;
+      border-radius: 30px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      box-shadow: 0 25px 50px rgba(0, 0, 0, 0.3), inset 0 0 60px rgba(255, 255, 255, 0.05);
+      position: relative;
+      z-index: 10;
+      max-width: 550px;
+      width: 90%;
+      animation: fadeInUp 1s ease;
+      overflow: hidden;
+    }
+
+    .welcome-box::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+      animation: shimmer 3s infinite;
+    }
+
+    @keyframes shimmer {
+      0% { left: -100%; }
+      100% { left: 100%; }
+    }
+
+    @keyframes fadeInUp {
+      from {
+        opacity: 0;
+        transform: translateY(40px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    /* Logo Icon */
+    .logo-icon {
+      font-size: 4rem;
+      margin-bottom: 1rem;
+      background: linear-gradient(135deg, #f50d28 0%, #6610f2 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: bounce 2s ease-in-out infinite;
+      display: inline-block;
+    }
+
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-10px); }
     }
 
     h1 {
-      font-size: 3rem;
-      font-weight: 600;
+      font-size: 2rem;
+      font-weight: 500;
+      margin-bottom: 0.5rem;
+      text-shadow: 0 0 20px rgba(255, 255, 255, 0.3);
     }
 
     h2 {
-      font-size: 2rem;
-      margin-bottom: 1rem;
+      font-size: 1.8rem;
+      font-weight: 700;
+      margin-bottom: 1.5rem;
+      background: linear-gradient(135deg, #f50d28 0%, #ff6b6b 50%, #6610f2 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      background-size: 200% auto;
+      animation: textGradient 3s linear infinite;
+    }
+
+    @keyframes textGradient {
+      0% { background-position: 0% center; }
+      100% { background-position: 200% center; }
     }
 
     p {
-      font-size: 1.2rem;
-      opacity: 0.9;
+      font-size: 1.1rem;
+      opacity: 0.85;
+      margin-bottom: 1rem;
     }
 
+    /* Input Group */
+    .url-input-group {
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 15px;
+      padding: 5px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: all 0.3s ease;
+    }
+
+    .url-input-group:hover {
+      border-color: rgba(255, 255, 255, 0.3);
+      box-shadow: 0 0 20px rgba(102, 16, 242, 0.2);
+    }
+
+    .url-input-group .form-control {
+      background: transparent;
+      border: none;
+      color: white;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9rem;
+      padding: 12px 15px;
+    }
+
+    .url-input-group .form-control:disabled {
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .url-input-group .form-control:focus {
+      box-shadow: none;
+    }
+
+    .btn-copy {
+      background: linear-gradient(135deg, #f50d28 0%, #6610f2 100%);
+      border: none;
+      border-radius: 12px !important;
+      padding: 12px 18px;
+      transition: all 0.3s ease;
+    }
+
+    .btn-copy:hover {
+      transform: scale(1.05);
+      box-shadow: 0 5px 20px rgba(245, 13, 40, 0.4);
+    }
+
+    .btn-copy:active {
+      transform: scale(0.95);
+    }
+
+    /* Custom Buttons */
     .btn-custom {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
       margin-top: 1.5rem;
-      background-color: white;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.95) 0%, rgba(240, 240, 240, 0.9) 100%);
       color: #6610f2;
-      border-radius: 25px;
-      padding: 0.6rem 1.5rem;
+      border-radius: 50px;
+      padding: 14px 30px;
       font-weight: 600;
+      font-size: 1rem;
+      transition: all 0.3s ease;
+      text-decoration: none;
+      border: none;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .btn-custom::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(102, 16, 242, 0.2), transparent);
+      transition: left 0.5s;
+    }
+
+    .btn-custom:hover::before {
+      left: 100%;
+    }
+
+    .btn-custom:hover {
+      transform: translateY(-3px) scale(1.02);
+      box-shadow: 0 15px 40px rgba(102, 16, 242, 0.3);
+      color: #f50d28;
+    }
+
+    .btn-custom:active {
+      transform: translateY(0) scale(0.98);
+    }
+
+    /* Back Button */
+    .btn-back {
+      position: fixed;
+      top: 25px;
+      left: 25px;
+      z-index: 999;
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 15px;
+      padding: 12px 20px;
+      color: white;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 8px;
       transition: all 0.3s ease;
       text-decoration: none;
     }
 
-    .btn-custom:hover {
-      background-color: #e9ecef;
-      color: #007bff;
+    .btn-back:hover {
+      background: rgba(255, 255, 255, 0.2);
+      transform: translateX(-5px);
+      color: white;
+    }
+
+    .btn-back i {
+      transition: transform 0.3s ease;
+    }
+
+    .btn-back:hover i {
+      transform: translateX(-5px);
+    }
+
+    /* Feature Cards */
+    .features {
+      display: flex;
+      gap: 15px;
+      margin-top: 2rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .feature-badge {
+      background: rgba(255, 255, 255, 0.1);
+      padding: 8px 16px;
+      border-radius: 50px;
+      font-size: 0.85rem;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: all 0.3s ease;
+    }
+
+    .feature-badge:hover {
+      background: rgba(255, 255, 255, 0.15);
+      transform: translateY(-2px);
+    }
+
+    .feature-badge i {
+      font-size: 1rem;
+    }
+
+    /* Mobile Responsive */
+    @media (max-width: 576px) {
+      .welcome-box {
+        padding: 2rem;
+        margin: 1rem;
+      }
+
+      h1 {
+        font-size: 1.5rem;
+      }
+
+      h2 {
+        font-size: 1.3rem;
+      }
+
+      .logo-icon {
+        font-size: 3rem;
+      }
+
+      .features {
+        flex-direction: column;
+        align-items: center;
+      }
     }
   </style>
 </head>
 
 <body>
-  <button onclick="location.href='https://lukeenortaed.site'" class="btn btn-light position-absolute m-3" style="top: 0; left: 0; z-index: 999">
-    <i class="bi bi-arrow-left-square"></i>
-</button>
+  <!-- Particles Background -->
+  <div class="particles">
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+    <div class="particle"></div>
+  </div>
+
+  <!-- Glowing Orbs -->
+  <div class="glow-orb glow-orb-1"></div>
+  <div class="glow-orb glow-orb-2"></div>
+
+  <!-- Back Button -->
+  <a href="https://lukeenortaed.site" class="btn-back">
+    <i class="bi bi-arrow-left"></i>
+    กลับหน้าหลัก
+  </a>
+
+  <!-- Main Content -->
   <div class="welcome-box">
+    <div class="logo-icon">
+      <i class="bi bi-rocket-takeoff-fill"></i>
+    </div>
     <h1>ยินดีต้อนรับเข้าสู่</h1>
-    <br />
     <h2>fastapi888.lukeenortaed.site</h2>
-    <div class="input-group mb-3">
+    
+    <div class="url-input-group input-group">
       <input type="text" class="form-control" aria-describedby="button-addon2"
         value="https://fastapi888.lukeenortaed.site" disabled />
-      <button class="btn btn-secondary" type="button" id="button-addon2" onclick="copyToClipboard(getUrl())">
+      <button class="btn btn-copy" type="button" id="button-addon2" onclick="copyToClipboard(getUrl())">
         <i class="fa-regular fa-copy"></i>
       </button>
     </div>
-    <a href="https://fastapi888.lukeenortaed.site/docs" class="btn btn-custom">API Document by Swagger UI</a>
+
+    <a href="https://fastapi888.lukeenortaed.site/docs" class="btn btn-custom">
+      <i class="bi bi-file-earmark-code"></i>
+      API Document by Swagger UI
+    </a>
+
+    <div class="features">
+      <span class="feature-badge">
+        <i class="bi bi-lightning-charge-fill" style="color: #ffc107;"></i>
+        Fast
+      </span>
+      <span class="feature-badge">
+        <i class="bi bi-shield-check" style="color: #28a745;"></i>
+        Secure
+      </span>
+      <span class="feature-badge">
+        <i class="bi bi-code-slash" style="color: #17a2b8;"></i>
+        RESTful API
+      </span>
+    </div>
   </div>
 </body>
 
@@ -101,16 +467,29 @@
     navigator.clipboard.writeText(text).then(
       function () {
         Swal.fire({
-          title: "คัดลอกลิงก์\nไปยังคลิปบอร์ดแล้ว",
+          title: "คัดลอกลิงก์สำเร็จ!",
+          text: "ลิงก์ถูกคัดลอกไปยังคลิปบอร์ดแล้ว",
           icon: "success",
-          draggable: true,
+          background: 'rgba(30, 30, 60, 0.95)',
+          color: '#fff',
+          confirmButtonColor: '#6610f2',
+          backdrop: 'rgba(0, 0, 0, 0.7)',
+          showClass: {
+            popup: 'animate__animated animate__fadeInUp animate__faster'
+          },
+          hideClass: {
+            popup: 'animate__animated animate__fadeOutDown animate__faster'
+          }
         });
       },
       function (err) {
         Swal.fire({
-          title: "ไม่สามารถคัดลอกลิงก์: " + err,
+          title: "เกิดข้อผิดพลาด",
+          text: "ไม่สามารถคัดลอกลิงก์ได้: " + err,
           icon: "error",
-          draggable: true,
+          background: 'rgba(30, 30, 60, 0.95)',
+          color: '#fff',
+          confirmButtonColor: '#f50d28',
         });
       }
     );

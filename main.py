@@ -3,6 +3,7 @@
 #                      IMPORTS
 # ============================================================
 import asyncio
+import base64
 from datetime import datetime, timedelta, timezone
 import json
 import logging
@@ -832,6 +833,13 @@ def healthz_get():
 def healthz_head():
     return Response(status_code=200)
 
+base64_icon = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    image_bytes = base64.b64decode(base64_icon)
+    
+    return Response(content=image_bytes, media_type="image/png")
+
 @app.head("/")
 def root_head():
     return Response(status_code=200)
@@ -1019,7 +1027,7 @@ async def update_user_role(
 @app.get("/users/list/", response_model=List[UserOut])
 async def list_users(
     skip: int = 0,
-    limit: int = 20,
+    limit: int = 100,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1594,7 +1602,7 @@ async def owner_set_this_channel_private(
 async def list_pending_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
-    limit: int = 20,
+    limit: int = 100,
     db: AsyncSession = Depends(get_db),
 ):
     stmt = (
@@ -1648,7 +1656,7 @@ async def list_pending_channels(
 async def list_public_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
-    limit: int = 20,
+    limit: int = 100,
     db: AsyncSession = Depends(get_db),
 ):
     # 1. สร้าง Base Query พร้อม Eager Load (ดึง User และ Files ทีเดียว)
@@ -1708,7 +1716,7 @@ async def list_public_channels(
 async def list_my_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
-    limit: int = 20,
+    limit: int = 100,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1762,7 +1770,7 @@ async def list_my_channels(
 async def list_all_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
-    limit: int = 20,
+    limit: int = 100,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
