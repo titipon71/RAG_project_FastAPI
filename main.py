@@ -838,7 +838,7 @@ def root_head():
 
 @app.get("/hashids-demo", response_class=HTMLResponse)
 async def read_root(request: Request):
-    return templates.TemplateResponse("index.html", {
+    return templates.TemplateResponse("hashids_demo.html", {
         "request": request,
         "salt_preview": settings.HASH_SALT[:3] + "***"
     })
@@ -867,7 +867,7 @@ async def process_hashids(
             error_msg = "ไม่สามารถถอดรหัสได้ (Invalid Hash)"
 
     # ส่งค่ากลับไปที่ template เดิม
-    return templates.TemplateResponse("index.html", {
+    return templates.TemplateResponse("hashids_demo.html", {
         "request": request,
         "salt_preview": settings.HASH_SALT[:3] + "***",
         "action": action,             # ส่งกลับไปเพื่อเช็คว่าเพิ่งทำอะไรเสร็จ
