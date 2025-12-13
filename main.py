@@ -10,6 +10,7 @@ import logging
 import shutil
 from typing import Optional, AsyncGenerator, List
 # from urllib import response
+from unittest import result
 import uuid, pathlib
 import aiofiles
 from fastapi import Body, FastAPI, APIRouter, Depends, File as FastAPIFile, Form, UploadFile, HTTPException, status, Query, Path , Request, Response
@@ -96,7 +97,7 @@ def decode_id(hashed_id: str) -> Optional[int]:
 # ============================================================
 class Base(DeclarativeBase):
     pass
-
+    
 class RoleUser(str, enum.Enum):
     user = "user"
     admin = "admin"
@@ -1368,7 +1369,7 @@ async def approved_rejected_public_request(
     if channel.status != RoleChannel.pending:
         raise HTTPException(status_code=400, detail="Channel is not pending")
 
-    event_table = await get_latest_pending_event(db, channel_id)
+    event_table = await get_latest_pending_event(db, decoded_channel_id)
     if not event_table:
         raise HTTPException(status_code=404, detail="No pending request event found")
     now =  datetime.now(timezone.utc)
@@ -2202,13 +2203,13 @@ async def get_chat_history(session_id: str = Path(..., gt=0),
 # ============================================================
 @app.get("/events/request/{user_id}", response_model=List[UserRequestChannelStatusEventResponse])
 async def get_channel_status_events_by_user(
-    user_id: str = Path(...),
+    user_id: int = Path(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    real_user_id = decode_id(user_id)
-    if real_user_id is None:
-        raise HTTPException(status_code=404, detail="Invalid User ID")
+    real_user_id = user_id
+    # if real_user_id is None:
+    #     raise HTTPException(status_code=404, detail="Invalid User ID")
 
     # 1) ตรวจสอบสิทธิ์: ต้องเป็น admin หรือ เจ้าของ user_id เท่านั้น
     if current_user.role != RoleUser.admin and current_user.users_id != real_user_id:
@@ -2228,7 +2229,7 @@ async def get_channel_status_events_by_user(
         # สร้าง Object response
         response_item = UserRequestChannelStatusEventResponse(
             event_id=ev.event_id,
-            channel_id=ev.channel_id, # ตรงนี้ Validator จะทำงานแปลง int -> encoded str ให้
+            channel_id=ev.channel_id, 
             old_status=ev.old_status,
             new_status=ev.new_status,
             requested_by=ev.requested_by,
@@ -2250,3 +2251,17 @@ async def get_channel_status_events_by_user(
 def debug_endpoint():
     rag_engine.debug_list_docs_by_channel(channel_id=6)
     return {"message": "Debug payload received"}
+
+# @app.get("/debug-user-info")
+# async def debug_user_info(db: AsyncSession = Depends(get_db)):
+#     result = await db.execute(select(User))
+#     users = result.scalars().all()
+#     user_list = []
+#     for u in users:
+#         user_list.append({
+#             "users_id": u.users_id,
+#             "username": u.username,
+#             "role": u.role,
+#             "created_at": u.created_at,
+#         })
+#     return user_list
