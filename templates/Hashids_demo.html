@@ -531,6 +531,39 @@
                 font-size: 1.3rem;
             }
         }
+        /* Back Button */
+    .btn-back {
+      position: fixed;
+      top: 25px;
+      left: 25px;
+      z-index: 999;
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 15px;
+      padding: 12px 20px;
+      color: white;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.3s ease;
+      text-decoration: none;
+    }
+
+    .btn-back:hover {
+      background: rgba(255, 255, 255, 0.2);
+      transform: translateX(-5px);
+      color: white;
+    }
+
+    .btn-back i {
+      transition: transform 0.3s ease;
+    }
+
+    .btn-back:hover i {
+      transform: translateX(-5px);
+    }
     </style>
 </head>
 <body>
@@ -548,6 +581,11 @@
         <div class="particle"></div>
         <div class="particle"></div>
     </div>
+
+  <a href="https://fastapi888.lukeenortaed.site" class="btn-back">
+    <i class="bi bi-arrow-left"></i>
+    กลับหน้าหลัก
+  </a>
 
     <button class="btn btn-outline-secondary theme-toggle-btn" id="themeToggle" title="Switch Theme">
         <i class="bi bi-moon-stars-fill" id="themeIcon"></i>

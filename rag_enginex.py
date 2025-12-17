@@ -31,6 +31,9 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
+from llama_index.core.callbacks.base_handler import BaseCallbackHandler
+from llama_index.core.callbacks.schema import CBEventType, EventPayload
+from llama_index.core.callbacks import CallbackManager
 # ==========================================
 # 0. Logging Setup (Custom Colors)
 # ==========================================
@@ -100,6 +103,38 @@ class AppConfig:
 config = AppConfig()
 
 # ==========================================
+# 1. Callback Handler for Ollama Token Usage
+# =========================================
+
+class OllamaTokenHandler(BaseCallbackHandler):
+    def __init__(self):
+        super().__init__(event_starts_to_ignore=[], event_ends_to_ignore=[])
+        self.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def on_event_start(self, event_type, payload, event_id, **kwargs):
+        pass  
+
+    def on_event_end(self, event_type, payload, event_id, **kwargs):
+        if event_type == CBEventType.LLM:
+            response = payload.get(EventPayload.RESPONSE)
+            # ตรวจสอบว่ามีข้อมูล raw จาก Ollama หรือไม่
+            if hasattr(response, "raw") and isinstance(response.raw, dict):
+                p_tokens = response.raw.get("prompt_eval_count", 0)
+                c_tokens = response.raw.get("eval_count", 0)
+                
+                self.latest_usage = {
+                    "prompt_tokens": p_tokens,
+                    "completion_tokens": c_tokens,
+                    "total_tokens": p_tokens + c_tokens
+                }
+    
+    def start_trace(self, trace_id=None):
+        pass
+
+    def end_trace(self, trace_id=None, trace_map=None):
+        pass
+
+# ==========================================
 # 2. RAG Service Class
 # ==========================================
 class RAGService:
@@ -107,6 +142,9 @@ class RAGService:
         # ใส่สี [bold cyan] เพื่อความสวยงาม
         logger.info("[bold cyan]🚀 Initializing RAG Service...[/]")
         self._ensure_directories()
+        
+        self.token_handler = OllamaTokenHandler()
+        LlamaSettings.callback_manager = CallbackManager([self.token_handler])
         
         # 1. Init Models (Heavy Load)
         logger.info(f"Loading Embedding Model: [yellow]{config.EMBED_MODEL_NAME}[/]")
@@ -263,55 +301,83 @@ class RAGService:
             logger.error(f"[bold red]❌ Failed to clear history for {user_key}:[/]\n{e}")
 
     
-    def query(self, question: str, channel_id: Union[str, int], sessions_id: Optional[int] = None) -> str:
-        logger.info(f"Querying: [bold cyan]{question}[/] (Channel: {channel_id})")
-        
-        filters = MetadataFilters(
-            filters=[ExactMatchFilter(key="channel_id", value=str(channel_id))]
-        )
-        
-        user_key = str(sessions_id) if sessions_id else "global_guest"
-        
-        memory = ChatMemoryBuffer.from_defaults(
-            token_limit=3000,
-            chat_store=self.chat_store,  
-            chat_store_key=user_key     
-        )
-        
-        
-        chat_engine = self.index.as_chat_engine(
-            chat_mode="context",
-            memory=memory,
-            similarity_top_k=config.TOP_K,
-            filters=filters,
-            llm=self.llm,                
-            response_mode="compact",
-            # system_prompt=config.SAFETY_SYSTEM_PROMPT,
-        )
+    def query(self, question: str, channel_id: Union[str, int], sessions_id: Optional[int] = None) -> Dict[str, Any]:
+            logger.info(f"Querying: [bold cyan]{question}[/] (Channel: {channel_id})")
+            self.token_handler.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            filters = MetadataFilters(
+                filters=[ExactMatchFilter(key="channel_id", value=str(channel_id))]
+            )
+            
+            user_key = str(sessions_id) if sessions_id else "global_guest"
+            
+            memory = ChatMemoryBuffer.from_defaults(
+                token_limit=3000,
+                chat_store=self.chat_store,  
+                chat_store_key=user_key     
+            )
+            
+            chat_engine = self.index.as_chat_engine(
+                chat_mode="context",
+                memory=memory,
+                similarity_top_k=config.TOP_K,
+                filters=filters,
+                llm=self.llm,                
+                response_mode="compact",
+            )
 
-        response = chat_engine.chat(question)
+            response = chat_engine.chat(question)
+            
+            # 1. ดึงข้อความคำตอบ
+            answer_text = self._strip_think(str(response))
 
-        if not response.source_nodes:
-            logger.info("[yellow]No source nodes found.[/]")
-            return "ตอนนี้ยังไม่มีเอกสารที่ใช้ตอบได้เลยนะ🤔 รบกวนเพิ่มเอกสารก่อนนะคะ😊"
+            # 2. ดึงจำนวน Token (Ollama ส่งมาใน raw)
+            token_usage = self.token_handler.latest_usage
 
+            
+            if not response.source_nodes:
+                logger.info("[yellow]No source nodes found.[/]")
+                # กรณีไม่เจอเอกสาร ก็ return usage เป็น 0 หรือค่าเท่าที่มี
+                return {
+                    "answer": "ตอนนี้ยังไม่มีเอกสารที่ใช้ตอบได้เลยนะ🤔 รบกวนเพิ่มเอกสารก่อนนะคะ😊",
+                    "usage": token_usage,
+                    "sources": []
+                }
 
-        file_names = {
-            node.node.metadata.get("filename") 
-            for node in response.source_nodes 
-            if node.node.metadata.get("filename")
-        }
-        if file_names:
-            logger.info(f"Sources used: [green]{file_names}[/]")
+            file_names = {
+                node.node.metadata.get("filename") 
+                for node in response.source_nodes 
+                if node.node.metadata.get("filename")
+            }
+            if file_names:
+                logger.info(f"Sources used: [green]{file_names}[/]")
 
-        return self._strip_think(str(response))
-
-    def debug_list_docs(self, channel_id: Union[str, int]):
+            # ส่งกลับเป็น Dictionary แทน String
+            return {
+                "answer": answer_text,
+                "usage": token_usage,
+                "sources": list(file_names)
+            }
+            
+    def debug_list_docs_by_channel(self, channel_id: int):
         res = self.chroma_collection.get(where={"channel_id": str(channel_id)})
-        print(f"--- DEBUG: Docs for channel {channel_id} ---")
-        print(f"IDs: {res.get('ids')}")
-        print(f"Metadatas: {res.get('metadatas')}")
-        print("------------------------------------------")
+
+        ids = res.get("ids", [])
+        metadatas = res.get("metadatas", [])
+
+        print(f"[DEBUG] chroma docs for channel {channel_id}")
+        print(f"  total_docs: {len(ids)}")
+
+        summary = {}
+        for m in metadatas:
+            file = m.get("file_name", "unknown")
+            page = m.get("page_label", "?")
+
+            summary.setdefault(file, set()).add(page)
+
+        for file, pages in summary.items():
+            pages = sorted(pages)
+            print(f"  - {file}: pages={pages}")
+
 
 
 # ==========================================

@@ -129,7 +129,7 @@
       box-shadow: 0 25px 50px rgba(0, 0, 0, 0.3), inset 0 0 60px rgba(255, 255, 255, 0.05);
       position: relative;
       z-index: 10;
-      max-width: 550px;
+      max-width: 600px; /* ขยายความกว้างขึ้นเล็กน้อยเพื่อให้ปุ่มเรียงสวย */
       width: 90%;
       animation: fadeInUp 1s ease;
       overflow: hidden;
@@ -257,13 +257,24 @@
       transform: scale(0.95);
     }
 
+    /* ------------------------------------------- */
+    /* ส่วนที่แก้ไขสำหรับจัดปุ่มให้อยู่แถวเดียวกัน */
+    /* ------------------------------------------- */
+    .button-group {
+      display: flex;
+      justify-content: center;
+      gap: 15px;
+      margin-top: 1.5rem;
+      flex-wrap: wrap; /* ป้องกันปุ่มล้นจอในมือถือ */
+    }
+
     /* Custom Buttons */
     .btn-custom {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 10px;
-      margin-top: 1.5rem;
+      /* margin-top: 1.5rem;  <-- เอาออก เพราะใช้ margin ที่ .button-group แล้ว */
       background: linear-gradient(135deg, rgba(255, 255, 255, 0.95) 0%, rgba(240, 240, 240, 0.9) 100%);
       color: #6610f2;
       border-radius: 50px;
@@ -276,6 +287,8 @@
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
       position: relative;
       overflow: hidden;
+      flex: 1; /* ให้ปุ่มขยายเต็มพื้นที่ถ้าจำเป็น */
+      min-width: 220px; /* กำหนดความกว้างขั้นต่ำเพื่อให้ปุ่มดูสมดุล */
     }
 
     .btn-custom::before {
@@ -386,6 +399,15 @@
         font-size: 3rem;
       }
 
+      /* ในมือถือ ให้ปุ่มเรียงซ้อนกันเหมือนเดิมเพื่อให้กดง่าย */
+      .button-group {
+         flex-direction: column;
+      }
+      
+      .btn-custom {
+          width: 100%;
+      }
+
       .features {
         flex-direction: column;
         align-items: center;
@@ -395,7 +417,6 @@
 </head>
 
 <body>
-  <!-- Particles Background -->
   <div class="particles">
     <div class="particle"></div>
     <div class="particle"></div>
@@ -409,17 +430,14 @@
     <div class="particle"></div>
   </div>
 
-  <!-- Glowing Orbs -->
   <div class="glow-orb glow-orb-1"></div>
   <div class="glow-orb glow-orb-2"></div>
 
-  <!-- Back Button -->
   <a href="https://lukeenortaed.site" class="btn-back">
     <i class="bi bi-arrow-left"></i>
     กลับหน้าหลัก
   </a>
 
-  <!-- Main Content -->
   <div class="welcome-box">
     <div class="logo-icon">
       <i class="bi bi-rocket-takeoff-fill"></i>
@@ -435,11 +453,17 @@
       </button>
     </div>
 
-    <a href="https://fastapi888.lukeenortaed.site/docs" class="btn btn-custom">
-      <i class="bi bi-file-earmark-code"></i>
-      API Document by Swagger UI
-    </a>
+    <div class="button-group">
+      <a href="https://fastapi888.lukeenortaed.site/docs" class="btn btn-custom">
+        <i class="bi bi-file-earmark-code"></i>
+        API Document
+      </a>
 
+      <a href="https://fastapi888.lukeenortaed.site/hashids-demo" class="btn btn-custom">
+        <i class="bi bi-shield-lock-fill"></i>
+        Hashids Demo
+      </a>
+    </div>
     <div class="features">
       <span class="feature-badge">
         <i class="bi bi-lightning-charge-fill" style="color: #ffc107;"></i>

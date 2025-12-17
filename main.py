@@ -8,20 +8,20 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 import shutil
-from typing import Optional, AsyncGenerator, List
+from typing import Annotated, Optional, AsyncGenerator, List
 # from urllib import response
 from unittest import result
 import uuid, pathlib
 import aiofiles
-from fastapi import Body, FastAPI, APIRouter, Depends, File as FastAPIFile, Form, UploadFile, HTTPException, status, Query, Path , Request, Response
+from fastapi import Body, FastAPI, APIRouter, Depends, File as FastAPIFile, Form, UploadFile, HTTPException, logger, status, Query, Path , Request, Response
 from fastapi.concurrency import asynccontextmanager
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 # import httpx
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel , EmailStr, field_validator, Field
+from pydantic import BaseModel , EmailStr, WithJsonSchema, field_validator, Field
 from pydantic_settings import BaseSettings
-from sqlalchemy import String, desc, func, select ,Enum as SAEnum, ForeignKey, text
+from sqlalchemy import Date, String, cast, desc, func, select ,Enum as SAEnum, ForeignKey, text
 from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, joinedload, relationship, selectinload
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
@@ -38,7 +38,7 @@ from llama_index.core import SimpleDirectoryReader
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-
+import sys
 from hashids import Hashids
 
 from dotenv import load_dotenv
@@ -50,12 +50,98 @@ from rag_enginex import rag_engine
 # from fastapi_limiter.depends import RateLimiter
 # from fastapi.responses import JSONResponse
 
+# ============================================================
+#                  CUSTOM COLOR LOGGING (FIXED)
+# ============================================================
+
+class CustomColorFormatter(logging.Formatter):
+    # กำหนดรหัสสี ANSI
+    RESET = "\033[0m"
+    CYAN = "\033[36m"
+    MAGENTA = "\033[35m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    BOLD_GREEN = "\033[1;32m"
+    BOLD_RED = "\033[1;31m"
+    WHITE = "\033[37m"
+
+    # กำหนดรูปแบบเวลา
+    timestamp_format = "%d/%m/%Y | %H:%M "
+
+    def format(self, record):
+        # 1. จัดการเวลา (Time) -> สีฟ้า
+        asctime = self.formatTime(record, self.timestamp_format)
+        time_str = f"{self.WHITE}{asctime}{self.RESET}"
+
+        # 2. จัดการ Level (INFO, ERROR) -> สีตามความรุนแรง
+        if record.levelno == logging.INFO:
+            level_color = self.BOLD_GREEN
+        elif record.levelno == logging.WARNING:
+            level_color = self.YELLOW
+        elif record.levelno == logging.ERROR:
+            level_color = self.BOLD_RED
+        else:
+            level_color = self.WHITE
+        
+        level_str = f"{level_color}{record.levelname}:{self.RESET}"
+
+        # 3. จัดการข้อความ (Message)
+        # เช็คว่าเป็น Access Log ของ Uvicorn หรือไม่ (ที่มี IP, Method, Status)
+        if "uvicorn.access" in record.name and isinstance(record.args, tuple) and len(record.args) == 5:
+            # Uvicorn Access Log ส่ง args มาเป็น (host, method, path, protocol, status)
+            client_addr = record.args[0]
+            method = record.args[1]
+            path = record.args[2]
+            protocol = record.args[3]
+            status_code = record.args[4]
+
+            # ใส่สี IP Address (สีม่วง)
+            client_addr_fmt = f"{self.MAGENTA}{client_addr}{self.RESET}"
+
+            # ใส่สี Status Code
+            if status_code < 300:
+                status_color = self.GREEN
+                status_text = self.GREEN
+                status_text = " OK"
+            elif status_code < 400:
+                status_color = self.YELLOW
+                status_text = self.YELLOW
+                status_text = " Warning"
+            else:
+                status_color = self.RED
+                status_text = self.RED
+                status_text = " Error"
+            status_fmt = f"{status_color}{status_code}{status_text}{self.RESET}"
+
+            # ประกอบร่างข้อความ Access Log ใหม่
+            message = f'{client_addr_fmt} - "{method} {path} HTTP/{protocol}" {status_fmt}'
+        else:
+            # กรณีเป็น Log ทั่วไป (เช่น System startup) หรือ Error Log
+            message = record.getMessage()
+
+        # 4. ส่งคืนข้อความสุดท้ายที่ประกอบเสร็จแล้ว
+        return f"{time_str} {level_str} {message}"
+
+# --- เรียกใช้งาน ---
+custom_formatter = CustomColorFormatter()
+
+# 1. แทนที่ Uvicorn Access Logger
+access_logger = logging.getLogger("uvicorn.access")
+if access_logger.handlers:
+    access_logger.handlers[0].setFormatter(custom_formatter)
+
+# 2. แทนที่ Uvicorn General Logger
+uvicorn_logger = logging.getLogger("uvicorn")
+if uvicorn_logger.handlers:
+    uvicorn_logger.handlers[0].setFormatter(custom_formatter)
 
 # ============================================================
 #                      SETTINGS / CONFIG
 # ============================================================
 
 load_dotenv()
+
 class Settings(BaseSettings):
     database_url: str
     secret_key: str = os.getenv("SECRET_KEY")
@@ -76,7 +162,7 @@ hasher = Hashids(salt=settings.HASH_SALT, min_length=settings.MIN_LENGTH)
 def encode_id(hashed_id: int) -> str:
     
     # debug
-    print(f"Encoding ID: {hashed_id}")
+    logging.debug(f"Encoding ID: {hashed_id} => {hasher.encode(hashed_id)}")
     
     return hasher.encode(hashed_id)
 
@@ -86,7 +172,7 @@ def decode_id(hashed_id: str) -> Optional[int]:
     
     decoded = hasher.decode(hashed_id)
     # debug
-    print(f"Decoding hashed ID: {hashed_id} to {decoded}")
+    logging.debug(f"Decoding hashed ID: {hashed_id} => {decoded}")
     
     if not decoded:
         return None
@@ -221,13 +307,6 @@ class User(Base):
         server_default=text("'user'"),     
     )
     
-    theme: Mapped[Theme] = mapped_column(
-        "theme",
-        MyEnum(Theme),
-        nullable=False,
-        server_default=text("'light'"),
-    )
-
     created_at: Mapped[datetime] = mapped_column(
         "created_at",
         server_default=func.current_timestamp(),
@@ -248,14 +327,14 @@ class File(Base):
 
     channel = relationship("Channel", back_populates="files")
     uploader = relationship("User", back_populates="uploaded_files")
-class sessions(Base):
+class Sessions(Base):
     __tablename__ = "sessions"
     sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
     channel_id: Mapped[int] = mapped_column("channel_id", MyInt(unsigned=True), nullable=False)
     user_id: Mapped[int] = mapped_column("user_id", MyInt(unsigned=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
-class chats(Base):
+class Chats(Base):
     __tablename__ = "chats"
     chat_id: Mapped[int] = mapped_column("chat_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
     channels_id: Mapped[int] = mapped_column("channels_id", MyInt(unsigned=True), nullable=False)
@@ -427,7 +506,7 @@ async def get_current_user(
 ):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        detail="ไม่สามารถตรวจสอบยืนยันตัวตนได้",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
@@ -450,10 +529,10 @@ async def get_owned_session(
     user_id: int,
 ):
     stmt = (
-        select(sessions)
+        select(Sessions)
         .where(
-            sessions.sessions_id == session_id,
-            sessions.user_id == user_id,   
+            Sessions.sessions_id == session_id,
+            Sessions.user_id == user_id,   
         )
     )
     res = await db.execute(stmt)
@@ -464,8 +543,7 @@ async def get_owned_session(
 #                      RAG / AI HELPERS
 # ============================================================
 
-async def call_ai(messages: List[dict], channel_id: int,session_id: int ) -> str:
-
+async def call_ai(messages: List[dict], channel_id: int, session_id: int) -> dict:
     last_user_msg = None
     for m in reversed(messages):
         if m["role"] == "user":
@@ -475,8 +553,9 @@ async def call_ai(messages: List[dict], channel_id: int,session_id: int ) -> str
         last_user_msg = "สรุปข้อมูลจากฐานเอกสารให้หน่อย"
 
     loop = asyncio.get_running_loop()
-    answer = await loop.run_in_executor(None, rag_engine.query, last_user_msg, channel_id, session_id)
-    return answer
+    # ตรงนี้จะได้ dict กลับมาแทน str
+    result = await loop.run_in_executor(None, rag_engine.query, last_user_msg, channel_id, session_id)
+    return result
 
 async def get_latest_pending_event( db: AsyncSession, channel_id: int) -> Optional[ChannelStatusEvent]:
     stmt = (
@@ -492,24 +571,30 @@ async def get_latest_pending_event( db: AsyncSession, channel_id: int) -> Option
     return result.scalar_one_or_none()
 
 # ============================================================
-#                      Pydantic SCHEMAS
+#                      Pydantic SCHEMAS (FIXED)
 # ============================================================
+
+# --- Base Config for ORM Models ---
+class ORMBase(BaseModel):
+    class Config:
+        from_attributes = True
+        populate_by_name = True
+
+# --- User Schemas ---
 class UserCreate(BaseModel):
     username: str
     name: str
     password: str
-    email: Optional[EmailStr] = None   # ตารางอนุญาตให้เป็น NULL
+    email: Optional[EmailStr] = None
 
-class UserOut(BaseModel):
+class UserOut(ORMBase):
     users_id: int
     username: str
     name: str
     email: Optional[EmailStr] = None
     role: RoleUser
     created_at: datetime
-    class Config:
-        from_attributes = True
-        
+
 class UserUpdate(BaseModel):
     username: Optional[str] = None
     name: Optional[str] = None
@@ -525,227 +610,21 @@ class UserRoleUpdate(BaseModel):
     new_role: RoleUser
     secret_key: str    
 
-class ChannelCreate(BaseModel):
-    title: str
-    description: Optional[str] = None
-
-class ChannelResponse(BaseModel):
-    channels_id: str
-    title: str
-    description: Optional[str] = None
-    created_by: int
-    status: RoleChannel
-    
-    @field_validator('channels_id', mode='before')
-    def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v)
-        return v
-
-class ChannelOut(BaseModel):
-    channels_id: str
-    title: str
-    description: Optional[str]
-    status: RoleChannel
-    created_at: datetime
-    files: List[dict] 
-    
-    @field_validator('channels_id', mode='before')
-    def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v)
-        return v
-
-class ChannelUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    # status: Optional[RoleChannel] = None
-
-class ChannelUpdateResponse(BaseModel):
-    title: str
-    description: Optional[str] = None
-    
-class ChannelOneResponse(BaseModel):
-    channels_id: str
-    title: str
-    description: Optional[str] = None
-    status: RoleChannel
-    created_by_id: int
-    created_by_name: str
-    created_at: datetime
-    file_count: int
-    files: List[dict]
-    
-    @field_validator('channels_id', mode='before')
-    def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v)
-        return v
-
-class ChannelListPendingItem(BaseModel):
-    channels_id: str
-    title: str
-    description: Optional[str] = None
-    status: RoleChannel
-    created_by_id: int
-    created_by_name: str
-    created_at: datetime
-    file_count: int
-    files: List[dict]
-    
-    @field_validator('channels_id', mode='before')
-    def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v)
-        return v
-
-class ChannelListPublicItem(BaseModel):
-    channels_id: str
-    title: str
-    description: Optional[str] = None
-    status: RoleChannel
-    created_by_id: int
-    created_by_name: str
-    created_at: datetime
-    file_count: int
-    files: List[dict] 
-    
-    @field_validator('channels_id', mode='before')
-    def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v)
-        return v
-
-class ChannelListAllItem(BaseModel):
-    channels_id: str
-    title: str
-    description: Optional[str] = None
-    status: RoleChannel
-    created_by_id: int
-    created_by_name: str
-    created_at: datetime
-    file_count: int
-    files: List[dict] 
-
-    @field_validator('channels_id', mode='before')
-    def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v)
-        return v
-
-class ChannelUpdateStatus(BaseModel):
-    channels_id: str
-    status: RoleChannel
-
-class sessionCreate(BaseModel):
-    channel_id: str
-    
-    @field_validator('channel_id', mode='before')
-    def decode_channel_id(cls, v):
-        if isinstance(v, str):
-            decoded = decode_id(v)
-            if decoded is None:
-                raise ValueError("Invalid Channel ID")
-            return decoded
-        return v
-
-class chatCreate(BaseModel):
-    channels_id: str
-    users_id: int
-    sessions_id: int
-    message: str
-    sender_type: RoleSender
-    
-    @field_validator('channels_id', mode='before')
-    def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v)
-        return v
-
-class chatHistoryItem(BaseModel):
-    chat_id: int
-    channels_id: str
-    users_id: int
-    sessions_id: int
-    message: str
-    sender_type: RoleSender
+# --- File Schemas (Move up) ---
+class FileDetail(ORMBase):
+    files_id: str = Field(..., description="Hashed ID")
+    original_filename: str
+    size_bytes: int
+    mime: Optional[str]
+    channel_id: str 
+    public_url: Optional[str] = None
     created_at: datetime
     
-    @field_validator('channels_id', mode='before')
-    def encode_channel_id(cls, v):
+    @field_validator('files_id', mode='before')
+    def encode_files_id(cls, v):
         if isinstance(v, int):
             return encode_id(v)
         return v
-
-class ChatRequest(BaseModel):
-    sessions_id: str
-    message: str
-    
-    @field_validator('sessions_id', mode='before')
-    def encode_session_id(cls, v):
-        if isinstance(v, str):
-            real_id = decode_id(v)
-            if real_id is None:
-                raise ValueError("Invalid Session ID")
-            return real_id
-        return v 
-
-class ModerationResponse(BaseModel):
-    channels_id: str
-    old_status: RoleChannel
-    current_status: RoleChannel
-    event_id: int
-    message: str
-    
-    @field_validator('channels_id', mode='before')
-    def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v)
-        return v
-    
-class AdminDecisionIn(BaseModel):
-    approve: bool
-    reason: Optional[str] = None
-
-class AdminDecisionOut(BaseModel):
-    channels_id: str
-    decision: ModerationDecision
-    status_after: RoleChannel
-    event_id: int
-    decided_by: int
-    decided_at: datetime
-    message: str
-
-    @field_validator('channels_id', mode='before')
-    def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v)
-        return v
-    
-class SessionResponse(BaseModel):
-    sessions_id: str  = Field(..., validation_alias="sessions_id")
-    channel_id: str
-    user_id: int
-    created_at: datetime
-    
-    @field_validator('sessions_id', mode='before')
-    def encode_session_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v) 
-        return v    
-
-    @field_validator('channel_id', mode='before')
-    def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v)
-        return v
-class FileDetail(BaseModel):
-    files_id: str = Field(..., description="Hashed ID ของไฟล์")
-    original_filename: str = Field(..., description="ชื่อไฟล์เดิม")
-    size_bytes: int = Field(..., description="ขนาดไฟล์ (bytes)")
-    mime: str = Field(..., description="ชนิดไฟล์ (MIME type)")
-    channel_id: int = Field(..., description="ID ของ Channel ที่อัปโหลด")
-    public_url: Optional[str] = Field(None, description="URL สำหรับเข้าถึงไฟล์ (มีเฉพาะกรณี public channel)")
     
     @field_validator('channel_id', mode='before')
     def encode_channel_id(cls, v):
@@ -759,26 +638,197 @@ class FileUploadResponse(BaseModel):
 class FileListItem(BaseModel):
     files: list[FileDetail]
 
-class UserRequestChannelStatusEventResponse(BaseModel):
+# --- Channel Schemas ---
+class ChannelCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+
+class ChannelResponse(ORMBase):
+    channels_id: str
+    title: str
+    description: Optional[str] = None
+    created_by: int
+    status: RoleChannel
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int): return encode_id(v)
+        return v
+
+class ChannelOut(ORMBase):
+    channels_id: str
+    title: str
+    description: Optional[str]
+    status: RoleChannel
+    created_at: datetime
+    # แก้จาก List[dict] เป็น List[FileDetail] เพื่อให้ validator ทำงาน
+    files: List[FileDetail] 
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int): return encode_id(v)
+        return v
+
+class ChannelUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+class ChannelUpdateResponse(ORMBase):
+    title: str
+    description: Optional[str] = None
+    
+class ChannelOneResponse(ORMBase):
+    channels_id: str
+    title: str
+    description: Optional[str] = None
+    status: RoleChannel
+    created_by_id: int = Field(validation_alias='created_by') # Map field DB
+    created_by_name: str = "Unknown" # ต้องจัดการใน Router หรือใช้ property
+    created_at: datetime
+    file_count: int = 0
+    files: List[FileDetail]
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int): return encode_id(v)
+        return v
+
+# --- List Items ---
+class ChannelListPendingItem(ChannelOneResponse):
+    pass
+
+class ChannelListPublicItem(ChannelOneResponse):
+    pass
+
+class ChannelListAllItem(ChannelOneResponse):
+    pass
+
+class ChannelUpdateStatus(ORMBase):
+    channels_id: str
+    status: RoleChannel
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int): return encode_id(v)
+        return v
+
+# --- Session & Chat ---
+class SessionCreate(BaseModel):
+    channel_id: Annotated[
+        int, 
+        WithJsonSchema({"type": "string", "example": "string"}) 
+    ]
+    
+    @field_validator('channel_id', mode='before')
+    def decode_channel_id(cls, v):
+        if isinstance(v, str):
+            decoded = decode_id(v) 
+            if decoded is None:
+                raise ValueError("Channel ID ไม่ถูกต้อง")
+            return decoded
+        return v
+
+class SessionResponse(ORMBase):
+    sessions_id: str
+    channel_id: str
+    user_id: int
+    created_at: datetime
+    
+    @field_validator('sessions_id', mode='before')
+    def encode_session_id(cls, v):
+        if isinstance(v, int): return encode_id(v) 
+        return v    
+
+    @field_validator('channel_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int): return encode_id(v)
+        return v
+
+class ChatRequest(BaseModel):
+    sessions_id: Annotated[
+        int, 
+        WithJsonSchema({
+            "type": "string", 
+            "example": "string", 
+            "description": "Session ID ที่ถูก Hash มาแล้ว"
+        })
+    ]
+    message: str
+    
+    @field_validator('sessions_id', mode='before')
+    def decode_session_id_val(cls, v):
+        # ถ้าส่งมาเป็น String (จาก JSON) ให้ Decode
+        if isinstance(v, str):
+            real_id = decode_id(v)
+            if real_id is None: 
+                raise ValueError("Invalid Session ID")
+            return real_id
+        return v
+
+class chatHistoryItem(ORMBase):
+    chat_id: int
+    channels_id: str
+    users_id: int
+    sessions_id: str # ควรเป็น str (hash) ถ้าอยากปกปิด
+    message: str
+    sender_type: RoleSender
+    created_at: datetime
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int): return encode_id(v)
+        return v
+    
+    @field_validator('sessions_id', mode='before')
+    def encode_session_id(cls, v):
+        if isinstance(v, int): return encode_id(v)
+        return v
+
+# --- Admin / Moderation ---
+class ModerationResponse(ORMBase):
+    channels_id: str
+    old_status: RoleChannel
+    current_status: str = Field(validation_alias='new_status') # Map จาก new_status หรือ status
+    event_id: int
+    message: str = "Success" # Default msg
+    
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int): return encode_id(v)
+        return v
+    
+class AdminDecisionIn(BaseModel):
+    approve: bool
+    reason: Optional[str] = None
+
+class AdminDecisionOut(ORMBase):
+    channels_id: str
+    decision: Optional[ModerationDecision]
+    status_after: RoleChannel = Field(validation_alias='new_status') # Trick mapping
+    event_id: int
+    decided_by: Optional[int]
+    decided_at: Optional[datetime]
+    message: str = "Processed"
+
+    @field_validator('channels_id', mode='before')
+    def encode_channel_id(cls, v):
+        if isinstance(v, int): return encode_id(v)
+        return v
+
+class UserRequestChannelStatusEventResponse(ORMBase):
     event_id: int
     channel_id: str
     old_status: RoleChannel
     new_status: RoleChannel
     requested_by: int
-    
-    # เพิ่ม field เหล่านี้ให้ครบตามที่คุณพยายาม assign ด้านล่าง
-    # ควรใส่เป็น Optional เพราะ event ที่เพิ่งสร้างอาจยังไม่มีผลการตัดสิน
     decided_by: Optional[int] = None 
-    decision: Optional[str] = None   # หรือเป็น Enum ถ้ามี
+    decision: Optional[ModerationDecision] = None   
     decision_reason: Optional[str] = None
     decided_at: Optional[datetime] = None
-    
     created_at: datetime
 
     @field_validator('channel_id', mode='before')
     def encode_channel_id(cls, v):
-        if isinstance(v, int):
-            return encode_id(v) # สมมติว่ามีฟังก์ชันนี้
+        if isinstance(v, int): return encode_id(v)
         return v
 
 # ============================================================
@@ -895,7 +945,7 @@ async def process_hashids(
 async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
     user = await authenticate_user(db, form.username, form.password)
     if not user:
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
+        raise HTTPException(status_code=400, detail="ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง")
     # sub ต้องเป็น string ตามข้อแนะนำของ JWT
     access_token = create_access_token(data={"sub": str(user.users_id)})
     return {"access_token": access_token, "token_type": "bearer"}
@@ -918,7 +968,7 @@ async def register_user(payload: UserCreate, db: AsyncSession = Depends(get_db))
     try:
         await db.flush()
     except IntegrityError:
-        raise HTTPException(status_code=409, detail="Name or email already exists")
+        raise HTTPException(status_code=409, detail="ชื่อหรืออีเมลนี้มีอยู่ในระบบแล้ว")
 
     # โหลดค่าที่ DB เติมให้ (เช่น id/created_at/role default)
     await db.refresh(user)
@@ -933,10 +983,10 @@ async def get_user_by_id_api(
 ):
     user = await get_user_by_id(db, user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
     # เฉพาะ admin หรือเจ้าของเท่านั้นที่ดูได้
     if current_user.role != RoleUser.admin and current_user.users_id != user_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
     return user
 
 # Update: Update user info (username, name, email)
@@ -949,9 +999,9 @@ async def update_user(
 ):
     user = await get_user_by_id(db, user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
     if current_user.role != RoleUser.admin and current_user.users_id != user_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
     if payload.username is not None:
         user.username = payload.username
     if payload.name is not None:
@@ -961,7 +1011,7 @@ async def update_user(
     try:
         await db.flush()
     except IntegrityError:
-        raise HTTPException(status_code=409, detail="Username, name, or email already exists")
+        raise HTTPException(status_code=409, detail="ชื่อผู้ใช้, ชื่อ หรืออีเมลนี้มีอยู่ในระบบแล้ว")
     await db.refresh(user)
     return user
 
@@ -974,13 +1024,13 @@ async def update_user_password(
 ):
     user = await get_user_by_id(db, user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
     if payload.new_password != payload.confirm_password:
-        raise HTTPException(status_code=400, detail="New password and confirmation do not match")
+        raise HTTPException(status_code=400, detail="รหัสผ่านใหม่และการยืนยันรหัสผ่านไม่ตรงกัน")
     if current_user.role != RoleUser.admin and current_user.users_id != user_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
     if not verify_password(payload.old_password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="Old password is incorrect")
+        raise HTTPException(status_code=400, detail="รหัสผ่านเดิมไม่ถูกต้อง")
     user.hashed_password = payload.new_password
     await db.flush()
     return
@@ -994,9 +1044,9 @@ async def delete_user(
 ):
     user = await get_user_by_id(db, user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
     if current_user.role != RoleUser.admin and current_user.users_id != user_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
     await db.delete(user)
     return
 
@@ -1009,14 +1059,14 @@ async def update_user_role(
     current_user: User = Depends(get_current_user),
 ):
     if current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="Not authorized")
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
 
     user = await get_user_by_id(db, user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
 
     if secret_key != "4+2*3=24":
-        raise HTTPException(status_code=403, detail="secret_key is incorrect")
+        raise HTTPException(status_code=403, detail="secret_key ไม่ถูกต้อง")
 
     user.role = new_role
     await db.flush()
@@ -1033,7 +1083,7 @@ async def list_users(
     current_user: User = Depends(get_current_user),
 ):
     if current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="Not authorized")
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
     stmt = select(User).offset(skip).limit(limit)
     result = await db.execute(stmt)
     users = result.scalars().all()
@@ -1091,7 +1141,7 @@ async def _save_upload_atomic(uf: UploadFile, final_path: pathlib.Path, max_size
             size_bytes += len(chunk)
             if size_bytes > max_size:
                 await uf.close()
-                raise HTTPException(status_code=413, detail=f"File too large: {uf.filename}")
+                raise HTTPException(status_code=413, detail=f"ไฟล์มีขนาดใหญ่เกินไป: {uf.filename}")
             await f.write(chunk)
     # replace แบบ atomic
     os.replace(tmp_path, final_path)
@@ -1129,11 +1179,10 @@ async def get_channel_details(
     ):
     
     decoded_channel_id = decode_id(channel_id)
-
     result = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
     channel = result.scalar_one_or_none()
     if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบช่อง Channel")
     
     is_private_like = channel.status in (RoleChannel.private , RoleChannel.pending)
     is_owner = channel.created_by == current_user.users_id
@@ -1141,7 +1190,7 @@ async def get_channel_details(
         
     # ตรวจสอบสิทธิ์การเข้าถึง
     if is_private_like and not (is_owner or is_admin):
-        raise HTTPException(status_code=403, detail="Not authorized to access this channel")
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์เข้าถึง channel")
     
     # ดึงรายการไฟล์ที่อยู่ใน channel นี้
     result = await db.execute(select(File).where(File.channel_id == channel_id))
@@ -1165,7 +1214,7 @@ async def get_channel_details(
         "description": channel.description,
         "status": channel.status,
         "created_at": channel.created_at,
-        "files": file_list,
+        "files": file_list
     }
 
 
@@ -1180,12 +1229,12 @@ async def delete_channel(channel_id: str, db: AsyncSession = Depends(get_db),cur
 
     if channel is None:
         # ถ้าไม่เจอ ให้คืน 404
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
 
     if current_user.role != RoleUser.admin and channel.created_by != current_user.users_id:
         raise HTTPException(
             status_code=403,
-            detail="Not authorized to delete this channel"
+            detail="ไม่มีสิทธิ์ลบ Channel นี้"
         ) 
     
     flie_row_result = await db.execute(select(File).where(File.channel_id == channel.channels_id))
@@ -1223,13 +1272,13 @@ async def update_channel(
     channels = result.scalars().one_or_none() 
 
     if channels is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
     
     isNotOwner = channels.created_by != current_user.users_id
     isNotAdmin = current_user.role != RoleUser.admin
     
     if isNotOwner and isNotAdmin:
-        raise HTTPException(status_code=403, detail="Only owner or admin can update channel")
+        raise HTTPException(status_code=403, detail="เฉพาะเจ้าของหรือแอดมินเท่านั้นที่สามารถอัปเดต channel ได้")
 
     channels.title = payload.title
     channels.description = payload.description
@@ -1251,17 +1300,16 @@ async def request_make_public(
     res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
     channel = res.scalar_one_or_none()
     if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
 
     # 2) ต้องเป็นเจ้าของเท่านั้น
     if channel.created_by != current_user.users_id:
-        raise HTTPException(status_code=403, detail="Only owner can request")
-
+        raise HTTPException(status_code=403, detail="เฉพาะเจ้าของเท่านั้นที่สามารถยื่นคำขอได้")
     # 3) ยื่นคำขอได้เฉพาะเมื่อสถานะเป็น private เท่านั้น
     if channel.status == RoleChannel.public:
-        raise HTTPException(status_code=400, detail="Channel already public")
+        raise HTTPException(status_code=400, detail="Channel เป็นสาธารณะแล้ว")
     if channel.status == RoleChannel.pending:
-        raise HTTPException(status_code=409, detail="Channel already pending approval")
+        raise HTTPException(status_code=409, detail="Channel อยู่ระหว่างรอการอนุมัติ")
 
     old_status = channel.status
     channel.status = RoleChannel.pending
@@ -1296,23 +1344,22 @@ async def cancel_request_make_public(
     # 1) Decode และตรวจสอบ ID
     decoded_channel_id = decode_id(channel_id)
     if decoded_channel_id is None:
-        raise HTTPException(status_code=404, detail="Invalid Channel ID")
+        raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
 
     # 2) โหลด channel
     res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
     channel = res.scalar_one_or_none()
     if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
 
     # 3) ต้องเป็นเจ้าของเท่านั้น
     if channel.created_by != current_user.users_id:
-        raise HTTPException(status_code=403, detail="Only owner can request")
-
+        raise HTTPException(status_code=403, detail="เฉพาะเจ้าของเท่านั้นที่สามารถยื่นคำขอได้")
     # 4) ยกเลิกได้เฉพาะเมื่อสถานะเป็น pending เท่านั้น
     if channel.status == RoleChannel.public:
-        raise HTTPException(status_code=400, detail="Channel is already public")
+        raise HTTPException(status_code=400, detail="Channel เป็นสาธารณะแล้ว")
     if channel.status == RoleChannel.private:
-        raise HTTPException(status_code=409, detail="Channel is already private (no request to cancel)")
+        raise HTTPException(status_code=409, detail="Channel เป็นส่วนตัวแล้ว (ไม่มีคำขอให้ยกเลิก)")
 
     # --- เก็บสถานะเดิม (Pending) ---
     old_status = channel.status
@@ -1358,20 +1405,20 @@ async def approved_rejected_public_request(
     current_user: User = Depends(get_current_user),
 ):
     if current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="Admin only")
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
     
     decoded_channel_id = decode_id(channel_id)
     res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
     channel = res.scalar_one_or_none()
     if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
     
     if channel.status != RoleChannel.pending:
-        raise HTTPException(status_code=400, detail="Channel is not pending")
+        raise HTTPException(status_code=400, detail="Channel ไม่ได้อยู่ในสถานะรอดำเนินการ")
 
     event_table = await get_latest_pending_event(db, decoded_channel_id)
     if not event_table:
-        raise HTTPException(status_code=404, detail="No pending request event found")
+        raise HTTPException(status_code=404, detail="ไม่พบเหตุการณ์คำขอที่รอดำเนินการ")
     now =  datetime.now(timezone.utc)
     
     reason = payload.reason
@@ -1411,21 +1458,20 @@ async def admin_forced_this_channel_to_be_public(
 ):
     # 1. Check Admin Permission
     if current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="Admin only")
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
     
     # 2. Get Channel
     real_channel_id = decode_id(channel_id)
     if real_channel_id is None:
-        raise HTTPException(status_code=404, detail="Invalid Channel ID")
+        raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
     res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
     channel = res.scalar_one_or_none()
     if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
     
     # 3. Validation: ทำได้เฉพาะช่องที่เป็น Public หรือ Pending เท่านั้น
     if channel.status != RoleChannel.private and channel.status != RoleChannel.pending:
-        raise HTTPException(status_code=400, detail="Channel is already private")
-
+        raise HTTPException(status_code=400, detail="Channel เป็นส่วนตัวแล้ว")
     # เก็บสถานะเดิมไว้ทำ Log
     old_status = channel.status
     now = datetime.now(timezone.utc)
@@ -1472,22 +1518,21 @@ async def admin_forced_this_channel_to_be_private(
 ):
     real_channel_id = decode_id(channel_id)
     if real_channel_id is None:
-        raise HTTPException(status_code=404, detail="Invalid Channel ID")
+        raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
     
     # 1. Check Admin Permission
     if current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="Admin only")
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
     
     # 2. Get Channel
     res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
     channel = res.scalar_one_or_none()
     if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
     
     # 3. Validation: ทำได้เฉพาะช่องที่เป็น Public หรือ Pending เท่านั้น
     if channel.status != RoleChannel.public and channel.status != RoleChannel.pending:
-        raise HTTPException(status_code=400, detail="Channel is already private")
-
+        raise HTTPException(status_code=400, detail="Channel เป็นส่วนตัวแล้ว")
     # เก็บสถานะเดิมไว้ทำ Log
     old_status = channel.status
     now = datetime.now(timezone.utc)
@@ -1537,15 +1582,14 @@ async def owner_set_this_channel_private(
     res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
     channel = res.scalar_one_or_none()
     if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
 
     # 2. ตรวจสอบสิทธิ์: ต้องเป็นเจ้าของ Channel หรือ Admin เท่านั้น
     if channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="Only owner can set channel to private")
-
+        raise HTTPException(status_code=403, detail="เฉพาะเจ้าของเท่านั้นที่สามารถตั้งค่า Channel เป็นส่วนตัวได้")
     # 3. ตรวจสอบสถานะปัจจุบัน: ถ้าเป็น private อยู่แล้วไม่ต้องทำอะไร
     if channel.status == RoleChannel.private:
-        raise HTTPException(status_code=400, detail="Channel is already private")
+        raise HTTPException(status_code=400, detail="Channel เป็นส่วนตัวแล้ว")
 
     old_status = channel.status
     channel.status = RoleChannel.private
@@ -1634,6 +1678,8 @@ async def list_pending_channels(
                 "storage_uri": f.storage_uri,
                 "size_bytes": f.size_bytes,
                 "created_at": f.created_at,
+                "mime": None,
+                "channel_id": f.channel_id,  # เพิ่ม channel_id (จำเป็น)    
             }
             for f in ch.files #
         ]
@@ -1693,8 +1739,8 @@ async def list_public_channels(
                 "storage_uri": f.storage_uri,
                 "size_bytes": f.size_bytes,
                 "created_at": f.created_at,
-                # ถ้า public ควรมี link ให้โหลดได้เลย
-                "public_url": f"/static/uploads/{f.storage_uri}" 
+                "channel_id": f.channel_id,  # เพิ่ม channel_id (จำเป็น)
+                "mime": None,
             }
             for f in ch.files
         ]
@@ -1750,6 +1796,8 @@ async def list_my_channels(
                 "storage_uri": f.storage_uri,
                 "size_bytes": f.size_bytes,
                 "created_at": f.created_at,
+                "channel_id": f.channel_id,  # เพิ่ม channel_id (จำเป็น)
+                "mime": None,
             }
             for f in ch.files #
         ]
@@ -1776,7 +1824,7 @@ async def list_all_channels(
     current_user: User = Depends(get_current_user),
 ):
     if current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="Admin only")
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
 
     stmt = (
         select(Channel)
@@ -1805,6 +1853,8 @@ async def list_all_channels(
                 "storage_uri": f.storage_uri,
                 "size_bytes": f.size_bytes,
                 "created_at": f.created_at,
+                "channel_id": f.channel_id,  # เพิ่ม channel_id (จำเป็น)
+                "mime": None,
             }
             for f in ch.files #
         ]
@@ -1833,13 +1883,13 @@ async def list_files_in_channel(
 ):
     real_channel_id = decode_id(channel_id)
     if real_channel_id is None:
-         raise HTTPException(status_code=404, detail="Invalid Channel ID")
+         raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
      
     # 1) ตรวจสอบว่า channel มีอยู่จริง
     res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
     channel = res.scalar_one_or_none()
     if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
     
     is_private = channel.status in (RoleChannel.private , RoleChannel.pending)
     is_owner = (channel.created_by == current_user.users_id)
@@ -1847,12 +1897,18 @@ async def list_files_in_channel(
         
     # 2) ตรวจสอบสิทธิ์การเข้าถึง
     if is_private and not (is_owner or is_admin):
-        raise HTTPException(status_code=403, detail="Not authorized to access this channel")
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการเข้าถึง Channel นี้")
 
     # 3) ดึงรายการไฟล์
     res = await db.execute(select(File).where(File.channel_id == channel_id))
     files = res.scalars().all()
 
+    if not files:
+        raise HTTPException(
+            status_code=404,
+            detail="ไม่พบไฟล์ใน Channel นี้"
+        )
+    
     file_list: list[FileDetail] = []
     for f in files:
         hashed_file_id = encode_id(f.files_id)
@@ -1868,6 +1924,7 @@ async def list_files_in_channel(
 
     return FileListItem(files=file_list)
 
+# แก้ไขฟังก์ชันนี้ใน main.py
 @app.post("/files/upload", status_code=201, response_model=FileUploadResponse)
 async def upload_files_only(
     channel_id: str = Form(...),
@@ -1875,32 +1932,33 @@ async def upload_files_only(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    real_channel_id = decode_id(channel_id)
-    if real_channel_id is None:
-        raise HTTPException(status_code=404, detail="Invalid Channel ID")
-    
-    # 1) ตรวจสอบว่า channel มีอยู่จริง
-    res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
-    channel = res.scalar_one_or_none()
-    if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    
-    isOwner = (channel.created_by == current_user.users_id)
-    
-    # 2) ตรวจสิทธิ์เจ้าของ channel
-    if not isOwner:
-        raise HTTPException(status_code=403, detail="Not authorized to upload to this channel")
-
-    # 3) จำกัดจำนวนไฟล์ต่อ request
-    if len(files) > 10:
-        raise HTTPException(status_code=400, detail="Too many files in one request")
-
-    stored_files: list[FileDetail] = []
-    created_paths: list[pathlib.Path] = []
-
+    import traceback  # import เพื่อใช้ดู error
     try:
+        real_channel_id = decode_id(channel_id)
+        if real_channel_id is None:
+            raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง (Decode Failed)")
+        
+        # 1) ตรวจสอบว่า channel มีอยู่จริง
+        res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
+        channel = res.scalar_one_or_none()
+        if channel is None:
+            raise HTTPException(status_code=404, detail=f"ไม่พบ Channel ID: {real_channel_id}")
+        
+        isOwner = (channel.created_by == current_user.users_id)
+        
+        # 2) ตรวจสิทธิ์เจ้าของ channel
+        if not isOwner:
+            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการอัปโหลดไปยัง Channel นี้")
+
+        # 3) จำกัดจำนวนไฟล์ต่อ request
+        if len(files) > 50:
+            raise HTTPException(status_code=400, detail="จำนวนไฟล์ในหนึ่งคำขอเกินกำหนด")
+        
+        stored_files: list[FileDetail] = []
+        created_paths: list[pathlib.Path] = []
+
         for uf in files:
-            final_path, rel_path = _build_storage_path(channel_id, uf.filename)
+            final_path, rel_path = _build_storage_path(real_channel_id, uf.filename)
 
             # 4) เขียนไฟล์ + ตรวจขนาด
             size_bytes = await _save_upload_atomic(uf, final_path, MAX_SIZE_PER_FILE)
@@ -1911,34 +1969,44 @@ async def upload_files_only(
             detected_mime = sniff_mime(final_path)
             if detected_mime not in ALLOW_MIME:
                 final_path.unlink(missing_ok=True)
-                raise HTTPException(status_code=400, detail=f"Unsupported file type: {detected_mime}")
+                raise HTTPException(status_code=400, detail=f"ประเภทไฟล์ไม่รองรับ: {detected_mime}")
 
             # 6) บันทึก DB
             frow = File(
                 uploaded_by=current_user.users_id,
-                channel_id=channel_id,
+                channel_id=real_channel_id,
                 original_filename=uf.filename or final_path.name,
                 storage_uri=rel_path,
                 size_bytes=size_bytes,
             )
             db.add(frow)
             await db.flush()  # ได้ files_id
+            await db.refresh(frow)
 
-            # 7) เติมเอกสารเข้า RAG (Chroma)
-            abs_path = UPLOAD_ROOT / rel_path
+            # 7) เติมเอกสารเข้า RAG (Chroma) --- จุดเสี่ยงสูง ---
             try:
+                print(f"DEBUG: กำลังส่งไฟล์ {frow.original_filename} ไปยัง RAG Engine...")
+                abs_path = UPLOAD_ROOT / rel_path
+                
+                # เช็คว่าไฟล์มีอยู่จริงไหม
+                if not abs_path.exists():
+                     raise FileNotFoundError(f"หาไฟล์ไม่เจอที่: {abs_path}")
+
                 docs = SimpleDirectoryReader(input_files=[str(abs_path)]).load_data()
                 for d in docs:
                     d.metadata = d.metadata or {}
-                    d.metadata["channel_id"] = str(channel_id)
+                    d.metadata["channel_id"] = str(real_channel_id)
                     d.metadata["filename"] = frow.original_filename
                     d.metadata["files_id"] = str(frow.files_id)
 
                 # เติมเอกสารลงคอลเลกชันเดิม
                 rag_engine.add_documents(docs)
+                print("DEBUG: RAG Engine ทำงานสำเร็จ")
 
-            except Exception as e:
-                print(f"[RAG] failed to index {abs_path}: {e}")
+            except Exception as rag_err:
+                print(f"WARNING: RAG Error (ข้ามไปก่อน): {rag_err}")
+                # ไม่ raise error เพื่อให้ upload ผ่านไปได้แม้ RAG พัง
+                # แต่ print ให้เห็นใน log
 
             hashed_file_id = encode_id(frow.files_id)
             file_resp = FileDetail(
@@ -1947,82 +2015,123 @@ async def upload_files_only(
                 size_bytes=size_bytes,
                 mime=detected_mime,
                 channel_id=channel_id,
-                public_url=f"/static/uploads/{rel_path}" if channel.status == RoleChannel.public else None
+                public_url=f"/static/uploads/{rel_path}" if channel.status == RoleChannel.public else None,
+                created_at=frow.created_at
             )
             stored_files.append(file_resp)
 
-    except Exception:
-        for p in created_paths:
+        return FileUploadResponse(files=stored_files)
+
+    except HTTPException as he:
+        # ถ้าเป็น HTTPException ให้ส่งต่อปกติ
+        raise he
+    except Exception as e:
+        # ถ้าเป็น Error อื่นๆ ให้ปริ้นรายละเอียดออกมา
+        print("="*30)
+        print("!!! CRITICAL UPLOAD ERROR !!!")
+        traceback.print_exc()  # ปริ้นบรรทัดที่พัง
+        print(f"Error Message: {e}")
+        print("="*30)
+        
+        # ลบไฟล์ที่ค้างอยู่
+        for p in locals().get('created_paths', []):
             try:
                 p.unlink(missing_ok=True)
-            except Exception:
+            except:
                 pass
-        raise
+        
+        # ส่ง Error กลับไปที่ Client เพื่อให้รู้ว่าเกิดอะไรขึ้น
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
-    return FileUploadResponse(files=stored_files)
 
-
-@app.delete("/files/delete/{file_id}", status_code=204)
+@app.delete("/files/delete/{file_hash}", status_code=204)
 async def delete_file(
-    file_id: str = Path(...),
+    file_hash: str = Path(..., description="Hashed ID of the file"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # แปลง hash กลับเป็น file_id
-    file_id = decode_id(file_id)
-    # 1. Query แบบ Join เพื่อลดการเรียก DB หลายรอบ
-    stmt = (
-        select(File)
-        .options(joinedload(File.channel)) 
-        .where(File.files_id == file_id)
-    )
-    result = await db.execute(stmt)
-    file = result.scalar_one_or_none()
-
-    if file is None:
-        raise HTTPException(status_code=404, detail="File not found")
-
-    # 2. Check Permission (Logic เดิมแต่เขียนให้กระชับ)
-    is_admin = current_user.role == RoleUser.admin
-    is_file_owner = file.uploaded_by == current_user.users_id
-    is_channel_owner = file.channel and file.channel.created_by == current_user.users_id
-
-    if not (is_admin or is_file_owner or is_channel_owner):
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    # 3. เตรียม Path (แก้ Hardcoded Path D:/...)
-    # ควรใช้ Path สัมพัทธ์ หรือดึงจาก Env Config
-    trash_folder = settings.TRASH_DIR
-    src = UPLOAD_ROOT / file.storage_uri
-    dst = trash_folder / f"{file.channel_id}_{file.files_id}_{src.name}"
-
-    # 4. ย้ายไฟล์แบบ Non-blocking (ใช้ Thread แยก)
-    # เพื่อไม่ให้ Server ค้างระหว่างย้ายไฟล์
-    async def move_file_task():
-        if src.exists():
-            trash_folder.mkdir(parents=True, exist_ok=True)
-            # shutil.move ปลอดภัยกว่า rename กรณีข้าม drive
-            await asyncio.to_thread(shutil.move, str(src), str(dst))
-
+    import traceback # เรียกตัวช่วยดู error
     try:
-        await move_file_task()
-    except Exception as e:
-        print(f"[FILE] Move to trash failed: {e}")
-        # ตัดสินใจตรงนี้: ถ้าย้ายไฟล์ไม่ผ่าน จะให้ลบ DB ไหม? 
-        # ปกติถ้าไฟล์จริงลบไม่ได้ ก็ไม่ควรลบ record ใน DB -> ควร raise Error
-        raise HTTPException(status_code=500, detail="Failed to move file to trash")
+        # ==========================================
+        # 1. VALIDATION PHASE (ตรวจสอบความถูกต้อง)
+        # ==========================================
+        decoded_id = decode_id(file_hash)
+        if decoded_id is None:
+            raise HTTPException(status_code=404, detail="รูปแบบ ID ไฟล์ไม่ถูกต้อง")
 
-    # 5. สั่งลบใน Session (รอ Auto-commit ทำงานตอนจบ request)
-    await db.delete(file)
-    
-    # 6. ลบ RAG 
-    # (ควรทำหลังจากมั่นใจว่าไฟล์ไปแล้ว)
-    try:
-        rag_engine.delete_documents_by_file_id(file.files_id)
-    except Exception as e:
-        print(f"[RAG] Warning: RAG deletion failed: {e}")
+        stmt = (
+            select(File)
+            .options(joinedload(File.channel))
+            .where(File.files_id == decoded_id)
+        )
+        result = await db.execute(stmt)
+        file_obj = result.scalar_one_or_none()
 
-    return
+        if not file_obj:
+            raise HTTPException(status_code=404, detail="ไม่พบไฟล์ในฐานข้อมูล")
+
+        # ตรวจสอบสิทธิ์
+        is_admin = current_user.role == RoleUser.admin
+        is_owner = file_obj.uploaded_by == current_user.users_id
+        # ใช้ safe navigation กัน error กรณี channel โดนลบไปก่อนแล้ว
+        is_channel_owner = file_obj.channel and (file_obj.channel.created_by == current_user.users_id)
+
+        if not (is_admin or is_owner or is_channel_owner):
+            print(f"Warning: User {current_user.users_id} tried to delete file {decoded_id} without permission.")
+            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการลบไฟล์นี้")
+
+        # ==========================================
+        # 2. PREPARATION PHASE (เตรียม Path)
+        # ==========================================
+        try:
+            src_path = (UPLOAD_ROOT / file_obj.storage_uri).resolve()
+        except Exception:
+            src_path = UPLOAD_ROOT / file_obj.storage_uri
+
+        # Security Check
+        if not str(src_path).startswith(str(UPLOAD_ROOT.resolve())):
+             print(f"Critical: Path traversal attempt? {src_path}")
+             raise HTTPException(status_code=400, detail="ตรวจสอบความปลอดภัยของเส้นทางไฟล์ไม่ผ่าน")
+
+        trash_dir = settings.TRASH_DIR
+        trash_filename = f"{int(datetime.now().timestamp())}_{file_obj.channel_id}_{file_obj.files_id}_{src_path.name}"
+        dst_path = trash_dir / trash_filename
+
+        # ==========================================
+        # 3. EXECUTION PHASE (เริ่มลบ)
+        # ==========================================
+
+        # 3.1 ลบจาก Database
+        await db.delete(file_obj)
+        await db.flush() 
+
+        # 3.2 ย้ายไฟล์จริง
+        if src_path.exists():
+            trash_dir.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(shutil.move, str(src_path), str(dst_path))
+            print(f"DEBUG: Moved file to trash: {dst_path}")
+        else:
+            print(f"DEBUG: File not found on disk, skipping move: {src_path}")
+
+        # 3.3 Clean up External Systems (RAG / AI)
+        try:
+            rag_engine.delete_documents_by_file_id(file_obj.files_id) 
+            print(f"DEBUG: RAG docs deleted for file {file_obj.files_id}")
+        except Exception as e:
+            print(f"WARNING: RAG Cleanup failed: {e}")
+
+        return Response(status_code=204)
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        # ปริ้น Error ออกมาให้เห็นชัดๆ
+        print("="*30)
+        print("!!! DELETE ERROR !!!")
+        traceback.print_exc()
+        print(f"Error Message: {e}")
+        print("="*30)
+        raise HTTPException(status_code=500, detail=f"Delete Failed: {str(e)}")
 
 
 # ============================================================
@@ -2030,27 +2139,28 @@ async def delete_file(
 # ============================================================
 @app.post("/session", status_code=201 , response_model=SessionResponse)
 async def create_session(
-    payload: sessionCreate,
+    payload: SessionCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    print(payload.channel_id)
     # 1) หา channel ก่อน
     result = await db.execute(
         select(Channel).where(Channel.channels_id == payload.channel_id)
     )
     channel = result.scalar_one_or_none()
     if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
 
     # 2) เช็คสิทธิ์เข้า channel นี้
     # - public: ใครก็เข้าได้
     # - private: ต้องเป็นคนสร้าง หรือ admin
     if channel.status in (RoleChannel.private, RoleChannel.pending):
         if channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
-            raise HTTPException(status_code=403, detail="Not authorized to access this channel")
+            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการเข้าถึง Channel นี้")
 
     # 4) สร้าง session ใหม่
-    new_session = sessions(
+    new_session = Sessions(
         channel_id=payload.channel_id,
         user_id=current_user.users_id,
     )
@@ -2068,24 +2178,23 @@ async def delete_session(
 ):
     real_session_id = decode_id(session_id)
     
-    result = await db.execute(select(sessions).where(sessions.sessions_id == real_session_id))
+    result = await db.execute(select(Sessions).where(Sessions.sessions_id == real_session_id))
     session = result.scalar_one_or_none()
     
     if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="ไม่พบ Session")
     
     isAdmin = (current_user.role == RoleUser.admin)
     isOwner = (session.user_id == current_user.users_id)
     
     if not isAdmin and not isOwner:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this session")
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการลบ Session นี้")
     
     await db.delete(session)
     
     rag_engine.clear_session_history(session.sessions_id) 
     
     return
-
 
 
 # ============================================================
@@ -2097,68 +2206,76 @@ async def Talking_with_Ollama_from_document(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # 1) เช็คว่า session เป็นของ user นี้
-    sess_stmt = (
-        select(sessions)
-        .where(
-            sessions.sessions_id == payload.sessions_id,
-            sessions.user_id == current_user.users_id,
+    try:
+        # 1) เช็คว่า session เป็นของ user นี้
+        sess_stmt = (
+            select(Sessions)
+            .where(
+                Sessions.sessions_id == payload.sessions_id,
+                Sessions.user_id == current_user.users_id,
+            )
         )
-    )
-    sess_res = await db.execute(sess_stmt)
-    sess = sess_res.scalar_one_or_none()
-    if sess is None:
-        raise HTTPException(status_code=403, detail="Not your session")
+        sess_res = await db.execute(sess_stmt)
+        sess = sess_res.scalar_one_or_none()
+        if sess is None:
+            raise HTTPException(status_code=403, detail="ไม่ใช่ Session ของคุณ")
 
-    # 2) เซฟข้อความ user
-    user_chat = chats(
-        channels_id=sess.channel_id,
-        users_id=current_user.users_id,
-        sessions_id=sess.sessions_id,
-        message=payload.message,
-        sender_type=RoleSender.user,
-    )
-    db.add(user_chat)
-    await db.flush()
-    await db.refresh(user_chat)
+        # 2) เซฟข้อความ user
+        user_chat = Chats(
+            channels_id=sess.channel_id,
+            users_id=current_user.users_id,
+            sessions_id=sess.sessions_id,
+            message=payload.message,
+            sender_type=RoleSender.user,
+        )
+        db.add(user_chat)
+        await db.flush()
+        await db.refresh(user_chat)
 
-    # ⚡️ 3) ส่งเฉพาะข้อความล่าสุดไปยัง AI
-    ai_messages = [
-        {"role": "user", "content": payload.message}
-    ]
+        # ⚡️ 3) ส่งเฉพาะข้อความล่าสุดไปยัง AI
+        ai_messages = [
+            {"role": "user", "content": payload.message}
+        ]
 
-    # 4) เรียก RAG / AI
-    ai_text = await call_ai(ai_messages, sess.channel_id, sess.sessions_id)
+        # 4) เรียก RAG / AI
+        ai_result = await call_ai(ai_messages, sess.channel_id, sess.sessions_id)
 
-    # 5) เซฟคำตอบ AI
-    ai_chat = chats(
-        channels_id=sess.channel_id,
-        users_id=current_user.users_id,
-        sessions_id=sess.sessions_id,
-        message=ai_text,
-        sender_type=RoleSender.AI,
-    )
-    db.add(ai_chat)
-    await db.flush()
-    await db.refresh(ai_chat)
+        ai_text = ai_result["answer"]
+        usage = ai_result["usage"] # จำนวน token
+        
+        # 5) เซฟคำตอบ AI
+        ai_chat = Chats(
+            channels_id=sess.channel_id,
+            users_id=current_user.users_id,
+            sessions_id=sess.sessions_id,
+            message=ai_text,
+            sender_type=RoleSender.AI,
+        )
+        db.add(ai_chat)
+        await db.flush()
+        await db.refresh(ai_chat)
 
-    # 6) ส่งกลับ
-    return {
-        "user_message": {
-            "chat_id": user_chat.chat_id,
-            "message": user_chat.message,
-            "sender_type": user_chat.sender_type,
-            "created_at": user_chat.created_at,
-        },
-        "ai_message": {
-            "chat_id": ai_chat.chat_id,
-            "message": ai_chat.message,
-            "sender_type": ai_chat.sender_type,
-            "created_at": ai_chat.created_at,
-        },
-    }
-
-
+        # 6) ส่งกลับ
+        return {
+            "user_message": {
+                "chat_id": user_chat.chat_id,
+                "message": user_chat.message,
+                "sender_type": user_chat.sender_type,
+                "created_at": user_chat.created_at,
+            },
+            "ai_message": {
+                "chat_id": ai_chat.chat_id,
+                "message": ai_chat.message,
+                "sender_type": ai_chat.sender_type,
+                "created_at": ai_chat.created_at,
+            },
+            "token_usage": usage
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print("OLLAMA ERROR:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/sessions/{session_id}/history", response_model=List[chatHistoryItem])
@@ -2168,19 +2285,19 @@ async def get_chat_history(session_id: str = Path(..., gt=0),
                            ):
     real_session_id = decode_id(session_id)
     if real_session_id is None:
-         raise HTTPException(status_code=404, detail="Invalid Session ID")
+         raise HTTPException(status_code=404, detail="รูปแบบ Session ID ไม่ถูกต้อง")
      
     # 1) ตรวจว่า session นี้เป็นของ user นี้จริงไหม
     owned_sess = await get_owned_session(db, real_session_id, current_user.users_id)
     if owned_sess is None:
         # ไม่ใช่ของเขา หรือไม่มีอยู่
-        raise HTTPException(status_code=403, detail="Not your session")
+        raise HTTPException(status_code=403, detail="ไม่ใช่ Session ของคุณ")
 
     # 2) ดึงประวัติ chat ทั้งหมดใน session นี้
     result = await db.execute(
-        select(chats)
-        .where(chats.sessions_id == session_id)
-        .order_by(chats.created_at.asc())
+        select(Chats)
+        .where(Chats.sessions_id == session_id)
+        .order_by(Chats.created_at.asc())
     )
     chat_rows = result.scalars().all()
 
@@ -2208,13 +2325,12 @@ async def get_channel_status_events_by_user(
     current_user: User = Depends(get_current_user),
 ):
     real_user_id = user_id
-    # if real_user_id is None:
-    #     raise HTTPException(status_code=404, detail="Invalid User ID")
+    if real_user_id is None:
+        raise HTTPException(status_code=404, detail="รูปแบบ User ID ไม่ถูกต้อง")
 
     # 1) ตรวจสอบสิทธิ์: ต้องเป็น admin หรือ เจ้าของ user_id เท่านั้น
     if current_user.role != RoleUser.admin and current_user.users_id != real_user_id:
-        raise HTTPException(status_code=403, detail="Not authorized to view these events")
-
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการเพื่อดูเหตุการณ์เหล่านี้")
     # 2) ดึง events
     result = await db.execute(
         select(ChannelStatusEvent)
@@ -2243,14 +2359,78 @@ async def get_channel_status_events_by_user(
     
     return event_list
 
+# ============================================================
+#                  STATISTICS ROUTES
+# ============================================================
+@app.get("/questions/stats/daily")
+async def number_of_questions_asked_per_day(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
+
+    # Group by Date (ตัดเวลาทิ้ง เอาแค่วันที่)
+    stmt = (
+        select(
+            cast(Chats.created_at, Date).label("date"), 
+            func.count().label("count")
+        )
+        .where(Chats.sender_type == RoleSender.user)
+        .group_by(cast(Chats.created_at, Date))
+        .order_by(cast(Chats.created_at, Date))
+    )
+
+    result = await db.execute(stmt)
+    data = result.all()
+    
+    # แปลงผลลัพธ์เป็น List of Dict
+    return [
+        {"date": row.date, "count": row.count} 
+        for row in data
+    ]
+    
+@app.get("/users/stats/daily")
+async def number_of_active_users_per_day(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
+
+    # Group by Date (ตัดเวลาทิ้ง เอาแค่วันที่)
+    stmt = (
+        select(
+            cast(Chats.created_at, Date).label("date"), 
+            func.count(func.distinct(Chats.users_id)).label("active_users")
+        )
+        .where(Chats.sender_type == RoleSender.user)
+        .group_by(cast(Chats.created_at, Date))
+        .order_by(cast(Chats.created_at, Date))
+    )
+
+    result = await db.execute(stmt)
+    data = result.all()
+    
+    # แปลงผลลัพธ์เป็น List of Dict
+    return [
+        {"date": row.date, "active_users": row.active_users} 
+        for row in data
+    ]
+
 
 # ============================================================
 #                  DEBUG / UTIL ROUTES
 # ============================================================
 @app.post("/debug")
-def debug_endpoint():
-    rag_engine.debug_list_docs_by_channel(channel_id=6)
-    return {"message": "Debug payload received"}
+def debug_endpoint(
+    channel_id: int = Body(..., embed=True)
+):
+    try:
+        rag_engine.debug_list_docs_by_channel(channel_id=channel_id)
+        return {"message": "Debug payload received"}
+    except Exception as e:
+        return {"error": str(e)}
 
 # @app.get("/debug-user-info")
 # async def debug_user_info(db: AsyncSession = Depends(get_db)):
