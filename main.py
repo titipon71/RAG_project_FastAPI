@@ -5,6 +5,7 @@
 import asyncio
 import base64
 from datetime import datetime, timedelta, timezone
+import hashlib
 from http import HTTPStatus
 import json
 import logging
@@ -14,15 +15,15 @@ from typing import Annotated, Optional, AsyncGenerator, List
 from unittest import result
 import uuid, pathlib
 import aiofiles
-from fastapi import Body, FastAPI, APIRouter, Depends, File as FastAPIFile, Form, UploadFile, HTTPException, logger, status, Query, Path , Request, Response
+from fastapi import Body, FastAPI, APIRouter, Depends, File as FastAPIFile, Form, UploadFile, HTTPException, status, Query, Path , Request, Response
 from fastapi.concurrency import asynccontextmanager
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm , APIKeyHeader
 # import httpx
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel , EmailStr, WithJsonSchema, field_validator, Field
 from pydantic_settings import BaseSettings
-from sqlalchemy import Date, String, cast, desc, func, select ,Enum as SAEnum, ForeignKey, text
+from sqlalchemy import Boolean, Date, String, cast, desc, func, select ,Enum as SAEnum, ForeignKey, text
 from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, joinedload, relationship, selectinload
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
@@ -30,7 +31,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 import enum
 from sqlalchemy.dialects.mysql import INTEGER as MyInt, ENUM as MyEnum
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,9 +42,9 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 import sys
 from hashids import Hashids
-
+import logging
 from dotenv import load_dotenv
-
+from scalar_fastapi import get_scalar_api_reference
 from rag_enginex import rag_engine
 
 
@@ -131,7 +132,7 @@ class CustomColorFormatter(logging.Formatter):
 
 # --- เรียกใช้งาน ---
 custom_formatter = CustomColorFormatter()
-
+logger = logging.getLogger("uvicorn.error")
 # 1. แทนที่ Uvicorn Access Logger
 access_logger = logging.getLogger("uvicorn.access")
 if access_logger.handlers:
@@ -161,6 +162,7 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+
 # ============================================================
 #                  Hashids INITIALIZATION
 # ============================================================
@@ -185,7 +187,7 @@ def decode_id(hashed_id: str) -> Optional[int]:
     return decoded[0]
 
 # ============================================================
-#                  DB BASE & ENUMS (SQLAlchemy)
+#                  Database & ENUMS (SQLAlchemy)
 # ============================================================
 class Base(DeclarativeBase):
     pass
@@ -431,6 +433,29 @@ class ChannelStatusEvent(Base):
     channel = relationship("Channel", back_populates="status_events")
     requester = relationship("User", foreign_keys=[requested_by])
     approver  = relationship("User", foreign_keys=[decided_by])
+    
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    key_id: Mapped[int] = mapped_column(MyInt(unsigned=True), primary_key=True, autoincrement=True)
+    
+    # ผูกกับ User เจ้าของ Key
+    user_id: Mapped[int] = mapped_column(MyInt(unsigned=True), ForeignKey("users.users_id"), nullable=False)
+    
+    # เก็บ Key ที่ Hash แล้ว (เพื่อความปลอดภัย ถ้า DB หลุด Key จริงก็ไม่หลุด)
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    
+    # ชื่อเรียก Key เช่น "My Chatbot A"
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    
+    # เอาไว้ปิด/เปิด Key นี้
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    
+    created_at: Mapped[datetime] = mapped_column(server_default=func.current_timestamp())
+
+    owner = relationship("User", backref="api_keys")
+    
+
 # ============================================================
 #                      DB ENGINE & SESSION
 # ============================================================
@@ -544,6 +569,40 @@ async def get_owned_session(
     res = await db.execute(stmt)
     return res.scalar_one_or_none()
 
+# ============================================================
+#               Security Dependency public API Key
+# ============================================================
+# สร้างตัวรับ Header "X-API-Key"
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+# ฟังก์ชันช่วย Hash Key (SHA256)
+def hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+# Dependency เอาไว้ใช้ใน Router
+async def get_user_by_api_key(
+    key: str = Depends(api_key_header), 
+    db: AsyncSession = Depends(get_db)
+) -> User:
+    if not key:
+        raise HTTPException(status_code=403, detail="API Key is missing")
+
+    hashed = hash_key(key)
+
+    # ค้นหาใน DB
+    stmt = select(ApiKey).where(ApiKey.key_hash == hashed, ApiKey.is_active == True)
+    result = await db.execute(stmt)
+    api_key_obj = result.scalar_one_or_none()
+
+    if not api_key_obj:
+        raise HTTPException(status_code=401, detail="Invalid or Inactive API Key")
+
+    # ถ้าเจอ Key ให้ดึง User เจ้าของ Key ออกมา
+    user_stmt = select(User).where(User.users_id == api_key_obj.user_id)
+    user_res = await db.execute(user_stmt)
+    user = user_res.scalar_one_or_none()
+
+    return user
 
 # ============================================================
 #                      RAG / AI HELPERS
@@ -616,7 +675,7 @@ class UserRoleUpdate(BaseModel):
     new_role: RoleUser
     secret_key: str    
 
-# --- File Schemas (Move up) ---
+# --- File Schemas  ---
 class FileDetail(ORMBase):
     files_id: str = Field(..., description="Hashed ID")
     original_filename: str
@@ -837,6 +896,19 @@ class UserRequestChannelStatusEventResponse(ORMBase):
         if isinstance(v, int): return encode_id(v)
         return v
 
+# --- Public API Key Schemas ---
+class ApiKeyCreate(BaseModel):
+    name: str
+
+# Schema สำหรับส่ง Key กลับ (แสดง key_secret แค่ครั้งเดียว)
+class ApiKeyResponse(BaseModel):
+    name: str
+    key_secret: str # Key จริงที่ยังไม่ Hash
+    created_at: datetime
+
+class ExternalChatRequest(BaseModel):
+    channel_id: str  # Hashed Channel ID
+    messages: List[dict] # [{"role": "user", "content": "..."}]
 # ============================================================
 #                  APP INITIALIZATION / MIDDLEWARE
 # ============================================================
@@ -942,6 +1014,13 @@ async def process_hashids(
         "result_decode": result_decode,
         "error_msg": error_msg
     })
+
+@app.get("/scalar", include_in_schema=False)
+async def scalar_html():
+    return get_scalar_api_reference(
+        # Your OpenAPI document
+        openapi_url=app.openapi_url,
+    )
 
 # ============================================================
 #                  AUTH ROUTES
@@ -1906,25 +1985,32 @@ async def list_files_in_channel(
         raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการเข้าถึง Channel นี้")
 
     # 3) ดึงรายการไฟล์
-    res = await db.execute(select(File).where(File.channel_id == channel_id))
+    res = await db.execute(select(File).where(File.channel_id == real_channel_id))
     files = res.scalars().all()
 
-    if not files:
-        raise HTTPException(
-            status_code=404,
-            detail="ไม่พบไฟล์ใน Channel นี้"
-        )
+    # if not files:
+    #     raise HTTPException(
+    #         status_code=404,
+    #         detail="ไม่พบไฟล์ใน Channel นี้"
+    #     )
     
     file_list: list[FileDetail] = []
     for f in files:
         hashed_file_id = encode_id(f.files_id)
+        
+        try:
+            mime_type = sniff_mime(UPLOAD_ROOT / f.storage_uri)
+        except Exception:
+            mime_type = "application/octet-stream"
+
         file_resp = FileDetail(
             files_id=hashed_file_id,
             original_filename=f.original_filename,
             size_bytes=f.size_bytes,
-            mime=sniff_mime(UPLOAD_ROOT / f.storage_uri),
+            mime=mime_type,
             channel_id=channel_id,
-            public_url=f"/static/uploads/{f.storage_uri}" if channel.status == RoleChannel.public else None
+            public_url=f"/static/uploads/{f.storage_uri}" if channel.status == RoleChannel.public else None,
+            created_at=f.created_at 
         )
         file_list.append(file_resp)
 
@@ -2431,6 +2517,113 @@ async def number_of_active_users_per_day(
     ]
 
 
+# ============================================================
+#                  PUBLIC API ROUTES
+# ============================================================
+@app.post("/auth/api-keys", response_model=ApiKeyResponse)
+async def create_api_key(
+    payload: ApiKeyCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # ใช้ logger ที่เราประกาศใหม่ข้างบน
+    logger.info(f"Start create_api_key | user_id={current_user.users_id}")
+
+    try:
+        # 1. Random Key
+        raw_key = "sk-" + secrets.token_urlsafe(32)
+
+        # 2. Hash key
+        hashed = hash_key(raw_key)
+
+        new_key = ApiKey(
+            user_id=current_user.users_id,
+            key_hash=hashed,
+            name=payload.name
+        )
+
+        db.add(new_key)
+        await db.flush()        
+        # 3. Refresh เพื่อเอา created_at และ key_id จาก DB
+        await db.refresh(new_key)
+
+        logger.info(f"API key created | id={new_key.key_id}")
+
+        # 4. ส่งค่ากลับ (ตรวจสอบว่ามี created_at ไหม ถ้าไม่มีให้ใช้เวลาปัจจุบันแทนกัน error)
+        return {
+            "name": new_key.name,
+            "key_secret": raw_key,
+            "created_at": new_key.created_at or datetime.now() 
+        }
+
+    except Exception as e:
+        # Log Error แบบเต็มๆ ออกมาดู
+        logger.error(f"Error creating API Key: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Server Error: {str(e)}"
+        )
+
+@app.post("/api/v1/chat/completions")
+async def public_chat_api(
+    payload: ExternalChatRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_user_by_api_key) # ใช้ API Key แทน Login
+):
+    # 1. แปลง Channel ID
+    real_channel_id = decode_id(payload.channel_id)
+    if not real_channel_id:
+        raise HTTPException(status_code=404, detail="Invalid Channel ID")
+
+    # 2. ตรวจสอบสิทธิ์ (User เจ้าของ Key เป็นเจ้าของ Channel หรือ Admin หรือไม่)
+    # (หรือถ้าอยากให้ Public Channel ใครใช้ก็ได้ ก็ปรับ Logic ตรงนี้)
+    stmt = select(Channel).where(Channel.channels_id == real_channel_id)
+    res = await db.execute(stmt)
+    channel = res.scalar_one_or_none()
+    
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+        
+    if channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
+        # อนุโลม: ถ้า Channel เป็น Public ให้ใช้ได้เลยไหม? แล้วแต่ Design
+        if channel.status != RoleChannel.public:
+             raise HTTPException(status_code=403, detail="Access denied to this channel")
+
+    # 3. ดึงข้อความล่าสุดจาก messages list
+    last_user_msg = payload.messages[-1]["content"]
+    
+    # 4. เรียก RAG Engine (แบบไม่ใช้ Session ID หรือใช้ ID หลอกๆ เพื่อเลี่ยง Redis error)
+    # หมายเหตุ: อาจต้องปรับ rag_engine.query เล็กน้อยถ้าต้องการส่ง History เข้าไปตรงๆ
+    # แต่เบื้องต้นเอาแบบถามตอบทีละคำถามก่อน
+    
+    try:
+        # ใช้ 0 หรือเลขมั่วๆ เป็น session_id ชั่วคราวไปก่อน
+        result = await asyncio.to_thread(
+            rag_engine.query, 
+            question=last_user_msg, 
+            channel_id=real_channel_id, 
+            sessions_id=0 
+        )
+    except Exception as e:
+        logger.error(f"RAG Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal AI Error")
+
+    # 5. ตอบกลับรูปแบบ OpenAI Format (มาตรฐานนิยม)
+    return {
+        "id": f"chatcmpl-{uuid.uuid4()}",
+        "object": "chat.completion",
+        "created": int(datetime.now().timestamp()),
+        "model": "qwen3:1.7b",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": result["answer"]
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": result["usage"]
+    }
 # ============================================================
 #                  DEBUG / UTIL ROUTES
 # ============================================================
