@@ -332,7 +332,6 @@ class RAGService:
 
             # 2. ดึงจำนวน Token (Ollama ส่งมาใน raw)
             token_usage = self.token_handler.latest_usage
-
             
             if not response.source_nodes:
                 logger.info("[yellow]No source nodes found.[/]")

@@ -5,6 +5,7 @@
 import asyncio
 import base64
 from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
 import json
 import logging
 import shutil
@@ -70,11 +71,11 @@ class CustomColorFormatter(logging.Formatter):
     timestamp_format = "%d/%m/%Y | %H:%M "
 
     def format(self, record):
-        # 1. จัดการเวลา (Time) -> สีฟ้า
+        # 1. จัดการเวลา (Time) -> สีขาว (ตามโค้ดเดิม)
         asctime = self.formatTime(record, self.timestamp_format)
         time_str = f"{self.WHITE}{asctime}{self.RESET}"
 
-        # 2. จัดการ Level (INFO, ERROR) -> สีตามความรุนแรง
+        # 2. จัดการ Level (INFO, ERROR)
         if record.levelno == logging.INFO:
             level_color = self.BOLD_GREEN
         elif record.levelno == logging.WARNING:
@@ -87,40 +88,45 @@ class CustomColorFormatter(logging.Formatter):
         level_str = f"{level_color}{record.levelname}:{self.RESET}"
 
         # 3. จัดการข้อความ (Message)
-        # เช็คว่าเป็น Access Log ของ Uvicorn หรือไม่ (ที่มี IP, Method, Status)
         if "uvicorn.access" in record.name and isinstance(record.args, tuple) and len(record.args) == 5:
-            # Uvicorn Access Log ส่ง args มาเป็น (host, method, path, protocol, status)
             client_addr = record.args[0]
             method = record.args[1]
             path = record.args[2]
             protocol = record.args[3]
             status_code = record.args[4]
 
-            # ใส่สี IP Address (สีม่วง)
             client_addr_fmt = f"{self.MAGENTA}{client_addr}{self.RESET}"
 
-            # ใส่สี Status Code
-            if status_code < 300:
-                status_color = self.GREEN
-                status_text = self.GREEN
-                status_text = " OK"
+            # --- ส่วนที่แก้ไข: จัดการ Status Text ให้ละเอียดขึ้น ---
+            
+            # กำหนดสีตาม Range ของ Status Code
+            if status_code < 200:
+                status_color = self.CYAN # Informational
+            elif status_code < 300:
+                status_color = self.GREEN # Success (2xx)
             elif status_code < 400:
-                status_color = self.YELLOW
-                status_text = self.YELLOW
-                status_text = " Warning"
+                status_color = self.YELLOW # Redirection (3xx)
+            elif status_code < 500:
+                status_color = self.RED # Client Error (4xx)
             else:
-                status_color = self.RED
-                status_text = self.RED
-                status_text = " Error"
-            status_fmt = f"{status_color}{status_code}{status_text}{self.RESET}"
+                status_color = self.BOLD_RED # Server Error (5xx)
 
-            # ประกอบร่างข้อความ Access Log ใหม่
+            # ดึงข้อความมาตรฐานจาก HTTPStatus
+            try:
+                # เช่น 200 -> "OK", 404 -> "Not Found", 500 -> "Internal Server Error"
+                phrase = HTTPStatus(status_code).phrase
+                status_text = f" {phrase}"
+            except ValueError:
+                # กรณีเจอ Code แปลกๆ ที่ไม่มีในมาตรฐาน
+                status_text = " Unknown"
+
+            status_fmt = f"{status_color}{status_code}{status_text}{self.RESET}"
+            # ----------------------------------------------------
+
             message = f'{client_addr_fmt} - "{method} {path} HTTP/{protocol}" {status_fmt}'
         else:
-            # กรณีเป็น Log ทั่วไป (เช่น System startup) หรือ Error Log
             message = record.getMessage()
 
-        # 4. ส่งคืนข้อความสุดท้ายที่ประกอบเสร็จแล้ว
         return f"{time_str} {level_str} {message}"
 
 # --- เรียกใช้งาน ---
@@ -2143,7 +2149,8 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    print(payload.channel_id)
+    # print(payload.channel_id)
+    
     # 1) หา channel ก่อน
     result = await db.execute(
         select(Channel).where(Channel.channels_id == payload.channel_id)
@@ -2155,11 +2162,16 @@ async def create_session(
     # 2) เช็คสิทธิ์เข้า channel นี้
     # - public: ใครก็เข้าได้
     # - private: ต้องเป็นคนสร้าง หรือ admin
-    if channel.status in (RoleChannel.private, RoleChannel.pending):
-        if channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
+    is_admin = (current_user.role == RoleUser.admin)
+    is_owner = (channel.created_by == current_user.users_id)
+    is_public = (channel.status == RoleChannel.public)
+    is_private = (channel.status == RoleChannel.private)
+    is_panding = (channel.status == RoleChannel.pending)
+    if is_public or is_panding:
+        if not is_owner and not is_admin:
             raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการเข้าถึง Channel นี้")
 
-    # 4) สร้าง session ใหม่
+    # 3) สร้าง session ใหม่
     new_session = Sessions(
         channel_id=payload.channel_id,
         user_id=current_user.users_id,
