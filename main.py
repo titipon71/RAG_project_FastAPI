@@ -909,6 +909,22 @@ class ApiKeyResponse(BaseModel):
 class ExternalChatRequest(BaseModel):
     channel_id: str  # Hashed Channel ID
     messages: List[dict] # [{"role": "user", "content": "..."}]
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "channel_id": "AbCd123",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "ช่วยสรุปสาระสำคัญของเอกสารใน Channel นี้ให้หน่อย"
+                        }
+                    ]
+                }
+            ]
+        }
+    }
 # ============================================================
 #                  APP INITIALIZATION / MIDDLEWARE
 # ============================================================
@@ -1373,6 +1389,17 @@ async def update_channel(
     await db.refresh(channels)
     
     return channels
+
+@app.get("/channels/{channel_id}/title")
+async def get_title_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
+    decoded_channel_id = decode_id(channel_id)
+    res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
+    channel = res.scalar_one_or_none()
+    if not channel:
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
+    return {
+        "channel_title": channel.title
+    }
 
 @app.post("/channels/{channel_id}/request-public", response_model=ModerationResponse, status_code=201)
 async def request_make_public(
