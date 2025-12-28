@@ -301,7 +301,7 @@ class RAGService:
             logger.error(f"[bold red]❌ Failed to clear history for {user_key}:[/]\n{e}")
 
     
-    def query(self, question: str, channel_id: Union[str, int], sessions_id: Optional[int] = None) -> Dict[str, Any]:
+    def query(self, question: str, channel_id: Union[str, int], sessions_id: Union[str, int, None] = None) -> Dict[str, Any]:
             logger.info(f"Querying: [bold cyan]{question}[/] (Channel: {channel_id})")
             self.token_handler.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             filters = MetadataFilters(
@@ -310,6 +310,8 @@ class RAGService:
             
             user_key = str(sessions_id) if sessions_id else "global_guest"
             
+            logger.info(f"Using Chat Store Key: {user_key}")
+
             memory = ChatMemoryBuffer.from_defaults(
                 token_limit=3000,
                 chat_store=self.chat_store,  

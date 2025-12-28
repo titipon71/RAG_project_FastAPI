@@ -4,7 +4,7 @@
 # ============================================================
 import asyncio
 import base64
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 from http import HTTPStatus
 import json
@@ -338,7 +338,7 @@ class File(Base):
 class Sessions(Base):
     __tablename__ = "sessions"
     sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
-    channel_id: Mapped[int] = mapped_column("channel_id", MyInt(unsigned=True), nullable=False)
+    channel_id: Mapped[int] = mapped_column("channel_id", MyInt(unsigned=True), nullable=True)
     user_id: Mapped[int] = mapped_column("user_id", MyInt(unsigned=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
@@ -346,7 +346,7 @@ class Chats(Base):
     __tablename__ = "chats"
     chat_id: Mapped[int] = mapped_column("chat_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
     channels_id: Mapped[int] = mapped_column("channels_id", MyInt(unsigned=True), nullable=False)
-    users_id: Mapped[int] = mapped_column("users_id", MyInt(unsigned=True), nullable=False)
+    users_id: Mapped[int] = mapped_column("users_id", MyInt(unsigned=True), nullable=True)
     sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), nullable=False)
     message: Mapped[str] = mapped_column("message", String(2000), nullable=False)
     sender_type: Mapped[RoleSender] = mapped_column("sender_type", MyEnum(RoleSender), nullable=False ,)
@@ -470,8 +470,12 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 # ---------- DB Session ----------
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
-        async with session.begin():
+        try:
             yield session
+            await session.commit()  # ✅ Commit เมื่อสำเร็จ
+        except Exception:
+            await session. rollback()  # ✅ Rollback เมื่อเกิด Error
+            raise
 
 
 # ============================================================
@@ -481,6 +485,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 ALGORITHM = "HS256"
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="auth/token", auto_error=False)
 
 def _truncate_bcrypt(p: str) -> str:
     # bcrypt limit is 72 *bytes*; เข้าง่ายๆ ด้วย utf-8 แล้วตัด
@@ -552,6 +557,24 @@ async def get_current_user(
     user = await get_user_by_id(db, uid)
     if not user:
         raise credentials_exception
+    return user
+
+async def get_optional_current_user(
+    token: Optional[str] = Depends(oauth2_scheme_optional),
+    db: AsyncSession = Depends(get_db),
+) -> Optional[User]:
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+        sub = payload.get("sub")
+        if sub is None:
+            return None
+        uid = int(sub)
+    except (JWTError, ValueError):
+        return None
+
+    user = await get_user_by_id(db, uid)
     return user
 
 async def get_owned_session(
@@ -631,6 +654,7 @@ async def get_latest_pending_event( db: AsyncSession, channel_id: int) -> Option
                )
         .order_by(desc(ChannelStatusEvent.created_at))
         .limit(1)
+        .with_for_update()
     )
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
@@ -705,8 +729,8 @@ class FileListItem(BaseModel):
 
 # --- Channel Schemas ---
 class ChannelCreate(BaseModel):
-    title: str
-    description: Optional[str] = None
+    title: str = Field(..., description="ชื่อ Channel" , min_length=1, max_length=255)
+    description: Optional[str] = Field(None, description="คำอธิบาย Channel", max_length=1000)
 
 class ChannelResponse(ORMBase):
     channels_id: str
@@ -758,6 +782,12 @@ class ChannelOneResponse(ORMBase):
         if isinstance(v, int): return encode_id(v)
         return v
 
+    # @field_validator('created_by_id', mode='before')
+    # def encode_creator_id(cls, v):
+    #     if isinstance(v, int):
+    #         return encode_id(v)
+    #     return v
+    
 # --- List Items ---
 class ChannelListPendingItem(ChannelOneResponse):
     pass
@@ -882,6 +912,7 @@ class AdminDecisionOut(ORMBase):
 class UserRequestChannelStatusEventResponse(ORMBase):
     event_id: int
     channel_id: str
+    channel_title: str
     old_status: RoleChannel
     new_status: RoleChannel
     requested_by: int
@@ -896,9 +927,14 @@ class UserRequestChannelStatusEventResponse(ORMBase):
         if isinstance(v, int): return encode_id(v)
         return v
 
+    class Config:
+        from_attributes = True
 # --- Public API Key Schemas ---
 class ApiKeyCreate(BaseModel):
     name: str
+
+class ApiKeyRevoke(BaseModel):
+    key_id: int = Field(..., description="ID ของ API Key ที่ต้องการเพิกถอน")
 
 # Schema สำหรับส่ง Key กลับ (แสดง key_secret แค่ครั้งเดียว)
 class ApiKeyResponse(BaseModel):
@@ -910,11 +946,14 @@ class ExternalChatRequest(BaseModel):
     channel_id: str  # Hashed Channel ID
     messages: List[dict] # [{"role": "user", "content": "..."}]
 
+    conversation_id: Optional[str] = None
+
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
                     "channel_id": "AbCd123",
+                    "conversation_id": "client-app-user-1234",
                     "messages": [
                         {
                             "role": "user",
@@ -1168,7 +1207,7 @@ async def update_user_role(
 
     if secret_key != "4+2*3=24":
         raise HTTPException(status_code=403, detail="secret_key ไม่ถูกต้อง")
-
+    logger.info(f"Admin {current_user.users_id} changed user {user_id} role to {new_role}")
     user.role = new_role
     await db.flush()
     await db.refresh(user)
@@ -1459,53 +1498,62 @@ async def cancel_request_make_public(
         raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
 
     # 2) โหลด channel
-    res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
+    # ใช้ with_for_update เพื่อกัน Race Condition
+    res = await db.execute(
+        select(Channel).where(Channel.channels_id == decoded_channel_id).with_for_update()
+    )
     channel = res.scalar_one_or_none()
+    
     if not channel:
         raise HTTPException(status_code=404, detail="ไม่พบ Channel")
 
     # 3) ต้องเป็นเจ้าของเท่านั้น
     if channel.created_by != current_user.users_id:
-        raise HTTPException(status_code=403, detail="เฉพาะเจ้าของเท่านั้นที่สามารถยื่นคำขอได้")
-    # 4) ยกเลิกได้เฉพาะเมื่อสถานะเป็น pending เท่านั้น
-    if channel.status == RoleChannel.public:
-        raise HTTPException(status_code=400, detail="Channel เป็นสาธารณะแล้ว")
-    if channel.status == RoleChannel.private:
-        raise HTTPException(status_code=409, detail="Channel เป็นส่วนตัวแล้ว (ไม่มีคำขอให้ยกเลิก)")
-
-    # --- เก็บสถานะเดิม (Pending) ---
-    old_status = channel.status
+        raise HTTPException(status_code=403, detail="เฉพาะเจ้าของเท่านั้นที่สามารถยกเลิกคำขอได้")
     
-    # --- [FIXED] เปลี่ยนสถานะกลับเป็น Private ---
+    # 4) ยกเลิกได้เฉพาะเมื่อสถานะเป็น pending เท่านั้น
+    if channel.status != RoleChannel.pending:
+        raise HTTPException(status_code=400, detail="Channel ไม่ได้อยู่ระหว่างรอการอนุมัติ")
+
+    # 5) ค้นหา Event ใบเดิมที่ค้างอยู่ (The Pending Ticket)
+    # ใช้ฟังก์ชัน get_latest_pending_event ที่คุณประกาศไว้แล้ว
+    pending_event = await get_latest_pending_event(db, decoded_channel_id)
+
+    if not pending_event:
+        # กรณี Data หลุด (channel เป็น pending แต่หา event ไม่เจอ)
+        # ให้ force update channel กลับเป็น private ได้เลย แต่แจ้งเตือนหน่อย
+        channel.status = RoleChannel.private
+        await db.flush()
+        return ModerationResponse(
+            channels_id=channel_id,
+            old_status=RoleChannel.pending, # สมมติ
+            new_status=RoleChannel.private,
+            event_id=0,
+            message="Status reverted (Event log not found)."
+        )
+
+    # 6) --- [จุดสำคัญ] Update Event เดิม แทนการสร้างใหม่ ---
+    now = datetime.now(timezone.utc)
+    
+    # อัปเดตข้อมูลใน Event เดิม
+    pending_event.decided_by = current_user.users_id  # ระบุว่าเจ้าของเป็นคนตัดสินใจเอง
+    pending_event.decision = ModerationDecision.rejected # ใช้ rejected ในความหมายว่า "คำขอตกไป"
+    pending_event.decision_reason = "Cancelled by user" # ใส่เหตุผลให้ชัดเจน
+    pending_event.decided_at = now
+    
+    # 7) เปลี่ยนสถานะ Channel กลับ
+    old_status_msg = channel.status
     channel.status = RoleChannel.private
 
-    # 5) สร้าง event (Auto-resolved)
-    # เราบันทึกว่ามีการเปลี่ยนกลับเป็น private แต่ใส่ข้อมูลว่า approved แล้ว (โดยตัว user เอง)
-    # เพื่อไม่ให้ไปค้างในรายการรออนุมัติของ Admin
-    now = datetime.now(timezone.utc)
-    event = ChannelStatusEvent(
-        channel_id=channel.channels_id,
-        old_status=old_status,
-        new_status=RoleChannel.private,
-        requested_by=current_user.users_id,
-        
-        # [IMPROVED] บันทึกว่าตัดสินใจแล้วทันที ไม่ต้องรอ Admin
-        decided_by=current_user.users_id, 
-        decision=ModerationDecision.approved, # อนุมัติให้กลับเป็น private
-        decision_reason="User cancelled the public request",
-        decided_at=now
-    )
-    
-    db.add(event)
     await db.flush()
     await db.refresh(channel)
-    await db.refresh(event)
+    await db.refresh(pending_event)
 
     return ModerationResponse(
         channels_id=channel.channels_id,
-        old_status=old_status,
-        current_status=channel.status,
-        event_id=event.event_id,
+        old_status=old_status_msg,
+        new_status=channel.status,
+        event_id=pending_event.event_id,
         message="Request cancelled. Channel reverted to private."
     )
 
@@ -1520,17 +1568,26 @@ async def approved_rejected_public_request(
         raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
     
     decoded_channel_id = decode_id(channel_id)
-    res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
+    res = await db.execute(select(Channel)
+                           .where(Channel.channels_id == decoded_channel_id)
+                            .with_for_update())
     channel = res.scalar_one_or_none()
     if not channel:
         raise HTTPException(status_code=404, detail="ไม่พบ Channel")
     
     if channel.status != RoleChannel.pending:
-        raise HTTPException(status_code=400, detail="Channel ไม่ได้อยู่ในสถานะรอดำเนินการ")
+        raise HTTPException(status_code=400, detail="Channel ถูกดำเนินการไปแล้วโดย Admin คนอื่น")
 
     event_table = await get_latest_pending_event(db, decoded_channel_id)
     if not event_table:
         raise HTTPException(status_code=404, detail="ไม่พบเหตุการณ์คำขอที่รอดำเนินการ")
+    
+    if event_table.decision is not None:
+        raise HTTPException(
+            status_code=409, 
+            detail="คำขอนี้ถูกดำเนินการไปแล้วโดย Admin คนอื่น"
+        )
+    
     now =  datetime.now(timezone.utc)
     
     reason = payload.reason
@@ -1773,7 +1830,7 @@ async def list_pending_channels(
     )
 
     if search_by_name:
-        stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
+        stmt = stmt.where(func.lower(Channel.title).contains(search_by_name.lower()))
 
     stmt = stmt.offset(skip).limit(limit)
 
@@ -1831,7 +1888,7 @@ async def list_public_channels(
 
     # 2. ใส่ Filter (Where) ก่อน Pagination
     if search_by_name:
-        stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
+        stmt = stmt.where(func.lower(Channel.title).contains(search_by_name.lower()))
 
     # 3. ปิดท้ายด้วย Pagination (Offset/Limit)
     stmt = stmt.offset(skip).limit(limit)
@@ -1874,8 +1931,8 @@ async def list_public_channels(
 @app.get("/channels/list/", response_model=List[ChannelOneResponse])
 async def list_my_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0, description="ข้ามจำนวนรายการ (Pagination)"),
+    limit: int = Query(100, ge=1, le=150, description="จำนวนรายการต่อหน้า"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1891,7 +1948,7 @@ async def list_my_channels(
     )
 
     if search_by_name:
-        stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
+        stmt = stmt.where(func.lower(Channel.title).contains(search_by_name.lower()))
 
     stmt = stmt.offset(skip).limit(limit)
 
@@ -1948,7 +2005,7 @@ async def list_all_channels(
     )
 
     if search_by_name:
-        stmt = stmt.where(Channel.title.like(f"%{search_by_name}%"))
+        stmt = stmt.where(func.lower(Channel.title).contains(search_by_name.lower()))
 
     stmt = stmt.offset(skip).limit(limit)
 
@@ -1998,22 +2055,31 @@ async def list_files_in_channel(
          raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
      
     # 1) ตรวจสอบว่า channel มีอยู่จริง
-    res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
+    stmt = (
+    select(Channel)
+    .options(
+        joinedload(Channel.creator),   # ดึง User มาพร้อมกัน
+        selectinload(Channel.files)    # ดึง Files มาพร้อมกัน
+    )
+    .where(Channel.channels_id == real_channel_id)
+    .with_for_update()
+    )
+    res = await db.execute(stmt)
     channel = res.scalar_one_or_none()
     if channel is None:
         raise HTTPException(status_code=404, detail="ไม่พบ Channel")
     
     is_private = channel.status in (RoleChannel.private , RoleChannel.pending)
-    is_owner = (channel.created_by == current_user.users_id)
-    is_admin = (current_user.role == RoleUser.admin)
+    is_owner = channel.created_by == current_user.users_id
+    is_admin = current_user.role == RoleUser.admin
         
     # 2) ตรวจสอบสิทธิ์การเข้าถึง
     if is_private and not (is_owner or is_admin):
         raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการเข้าถึง Channel นี้")
 
     # 3) ดึงรายการไฟล์
-    res = await db.execute(select(File).where(File.channel_id == real_channel_id))
-    files = res.scalars().all()
+    # res = await db.execute(select(File).where(File.channel_id == real_channel_id))
+    files = channel.files
 
     # if not files:
     #     raise HTTPException(
@@ -2078,11 +2144,13 @@ async def upload_files_only(
 
         for uf in files:
             final_path, rel_path = _build_storage_path(real_channel_id, uf.filename)
+            created_paths.append(final_path)
 
             # 4) เขียนไฟล์ + ตรวจขนาด
-            size_bytes = await _save_upload_atomic(uf, final_path, MAX_SIZE_PER_FILE)
-            created_paths.append(final_path)
-            await uf.close()
+            try:
+                size_bytes = await _save_upload_atomic(uf, final_path, MAX_SIZE_PER_FILE)
+            finally:
+                await uf.close()
 
             # 5) ตรวจ MIME
             detected_mime = sniff_mime(final_path)
@@ -2159,8 +2227,9 @@ async def upload_files_only(
             except:
                 pass
         
-        # ส่ง Error กลับไปที่ Client เพื่อให้รู้ว่าเกิดอะไรขึ้น
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+        # ส่ง Error กลับไปเพื่อให้รู้ว่าเกิดอะไรขึ้น
+        logger.error(f"Upload error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Upload failed. Please try again.")
 
 
 @app.delete("/files/delete/{file_hash}", status_code=204)
@@ -2252,7 +2321,16 @@ async def delete_file(
         print("="*30)
         raise HTTPException(status_code=500, detail=f"Delete Failed: {str(e)}")
 
-
+@app.get("/file/count/{channel_id}")
+async def count_files_in_channel(
+    channel_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(func.count(File.files_id)).where(File.channel_id == channel_id)
+    result = await db.execute(stmt)
+    count = result.scalar_one()
+    return {"channel_id": channel_id, "file_count": count}
+    
 # ============================================================
 #                  SESSION ROUTES
 # ============================================================
@@ -2260,7 +2338,7 @@ async def delete_file(
 async def create_session(
     payload: SessionCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_current_user),
 ):
     # print(payload.channel_id)
     
@@ -2272,22 +2350,31 @@ async def create_session(
     if channel is None:
         raise HTTPException(status_code=404, detail="ไม่พบ Channel")
 
-    # 2) เช็คสิทธิ์เข้า channel นี้
-    # - public: ใครก็เข้าได้
-    # - private: ต้องเป็นคนสร้าง หรือ admin
-    is_admin = (current_user.role == RoleUser.admin)
-    is_owner = (channel.created_by == current_user.users_id)
-    is_public = (channel.status == RoleChannel.public)
-    is_private = (channel.status == RoleChannel.private)
-    is_panding = (channel.status == RoleChannel.pending)
-    if is_public or is_panding:
-        if not is_owner and not is_admin:
-            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการเข้าถึง Channel นี้")
+    user_id = current_user.users_id if current_user else None
+    
+    # 2) เช็คสิทธิ์ (Permission Logic)
+    if user_id:
+        # --- กรณีเป็นสมาชิก (Logged-in User) ---
+        is_admin = (current_user.role == RoleUser.admin)
+        is_owner = (channel.created_by == user_id)
+        is_private_access = (is_owner or is_admin)
+        
+        # ถ้าเป็น private/pending และไม่ใช่เจ้าของ/admin -> ห้ามเข้า
+        if channel.status in (RoleChannel.private, RoleChannel.pending) and not is_private_access:
+            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์เข้าถึง Channel นี้")
+    else:
+        # --- กรณีเป็น Guest (ไม่ได้ Login) ---
+        # อนุญาตเฉพาะ Public Channel เท่านั้น
+        if channel.status != RoleChannel.public:
+            raise HTTPException(
+                status_code=401, # หรือ 403
+                detail="กรุณาเข้าสู่ระบบเพื่อใช้งาน Channel ส่วนตัว"
+            )
 
     # 3) สร้าง session ใหม่
     new_session = Sessions(
         channel_id=payload.channel_id,
-        user_id=current_user.users_id,
+        user_id=user_id,
     )
     db.add(new_session)
     await db.flush()
@@ -2443,52 +2530,81 @@ async def get_chat_history(session_id: str = Path(..., gt=0),
 # ============================================================
 #                 EVENT ROUTES
 # ============================================================
-@app.get("/events/request/{user_id}", response_model=List[UserRequestChannelStatusEventResponse])
+@app.get("/events/list/{user_id}", response_model=List[UserRequestChannelStatusEventResponse])
 async def get_channel_status_events_by_user(
-    user_id: int = Path(...),
+    user_id: int = Path(..., description="ID ของผู้ใช้งาน"),
+    skip: int = Query(0, ge=0, description="ข้ามจำนวนรายการ (Pagination)"),
+    limit: int = Query(10, ge=1, le=10, description="จำนวนสูงสุดที่ต้องการดึง"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    real_user_id = user_id
-    if real_user_id is None:
-        raise HTTPException(status_code=404, detail="รูปแบบ User ID ไม่ถูกต้อง")
-
-    # 1) ตรวจสอบสิทธิ์: ต้องเป็น admin หรือ เจ้าของ user_id เท่านั้น
-    if current_user.role != RoleUser.admin and current_user.users_id != real_user_id:
-        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการเพื่อดูเหตุการณ์เหล่านี้")
-    # 2) ดึง events
-    result = await db.execute(
-        select(ChannelStatusEvent)
-        .where(ChannelStatusEvent.requested_by == real_user_id)
-        .order_by(ChannelStatusEvent.created_at.desc())
-    )
-    events = result.scalars().all()
-
-    # 3) แปลงข้อมูลและส่งกลับ (Mapping)
-    event_list = []
-    for ev in events:
-        # สร้าง Object response
-        response_item = UserRequestChannelStatusEventResponse(
-            event_id=ev.event_id,
-            channel_id=ev.channel_id, 
-            old_status=ev.old_status,
-            new_status=ev.new_status,
-            requested_by=ev.requested_by,
-            decided_by=ev.decided_by,
-            decision=ev.decision,
-            decision_reason=ev.decision_reason,
-            created_at=ev.created_at,
-            decided_at=ev.decided_at,
+    # ตรวจสอบสิทธิ์ (ส่วนนี้ไม่ต้อง try/except เพราะถ้า fail คือเจตนาของเรา)
+    if current_user.role != RoleUser.admin and current_user.users_id != user_id:
+        logger.warning(f"Unauthorized access attempt by UserID: {current_user.users_id} targeting UserID: {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="ไม่มีสิทธิ์ดำเนินการเพื่อดูเหตุการณ์เหล่านี้"
         )
-        event_list.append(response_item)
-    
-    return event_list
+
+    try:
+        # --- เริ่มส่วนที่อาจเกิด Error (เช่น DB connection, Query ผิด) ---
+        
+        # ดึงข้อมูล (ใช้ selectinload เพื่อประสิทธิภาพตามที่แนะนำไปรอบก่อน)
+        stmt = (
+            select(ChannelStatusEvent)
+            .options(selectinload(ChannelStatusEvent.channel))
+            .where(ChannelStatusEvent.requested_by == user_id)
+            .order_by(ChannelStatusEvent.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+        
+        result = await db.execute(stmt)
+        events = result.scalars().all()
+
+        # แปลงข้อมูล
+        event_list = []
+        for ev in events:
+            response_item = UserRequestChannelStatusEventResponse(
+                event_id=ev.event_id,
+                channel_id=ev.channel_id,
+                channel_title=ev.channel.title if ev.channel else "Unknown Channel",
+                old_status=ev.old_status,
+                new_status=ev.new_status,
+                requested_by=ev.requested_by,
+                decided_by=ev.decided_by,
+                decision=ev.decision,
+                decision_reason=ev.decision_reason,
+                created_at=ev.created_at,
+                decided_at=ev.decided_at,
+            )
+            event_list.append(response_item)
+        
+        return event_list
+
+    except Exception as e:
+        # --- ส่วนจัดการเมื่อเกิด Error ---
+        
+        # 1. Log error ตัวจริงลงระบบ (User ไม่เห็นส่วนนี้)
+        # exc_info=True จะปริ้นท์ Stack Trace ยาวๆ ออกมาให้เราแก้บั๊ก
+        logger.error(f"Error fetching events for UserID {user_id}: {str(e)}", exc_info=True)
+        
+        # 2. ส่ง Error ทั่วไปกลับไปหา User (เพื่อความปลอดภัย ไม่ควรบอก Error จริง)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="เกิดข้อผิดพลาดภายในระบบ ไม่สามารถดึงข้อมูลได้ในขณะนี้"
+        )
 
 # ============================================================
 #                  STATISTICS ROUTES
 # ============================================================
 @app.get("/questions/stats/daily")
 async def number_of_questions_asked_per_day(
+    start_date: date | None = Query(None, description="วันเริ่มต้น (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="วันสิ้นสุด (YYYY-MM-DD)"),
+    year: int | None = Query(None, ge=2000, le=2100, description="ปีที่ต้องการ (เช่น 2025)"),
+    month: int | None = Query(None, ge=1, le=12, description="เดือนที่ต้องการ (1-12)"),
+    day: int | None = Query(None, ge=1, le=31, description="วันที่ต้องการ (1-31)"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -2502,9 +2618,23 @@ async def number_of_questions_asked_per_day(
             func.count().label("count")
         )
         .where(Chats.sender_type == RoleSender.user)
-        .group_by(cast(Chats.created_at, Date))
-        .order_by(cast(Chats.created_at, Date))
     )
+    
+    # --- Date Range Filter ---
+    if start_date:
+        stmt = stmt.where(cast(Chats.created_at, Date) >= start_date)
+    if end_date:
+        stmt = stmt.where(cast(Chats.created_at, Date) <= end_date)
+    
+    # --- Year / Month / Day Filter ---
+    if year:
+        stmt = stmt.where(func.year(Chats.created_at) == year)
+    if month:
+        stmt = stmt.where(func.month(Chats.created_at) == month)
+    if day:
+        stmt = stmt.where(func.day(Chats.created_at) == day)
+    
+    stmt = stmt.group_by(cast(Chats.created_at, Date)).order_by(cast(Chats.created_at, Date))
 
     result = await db.execute(stmt)
     data = result.all()
@@ -2517,6 +2647,11 @@ async def number_of_questions_asked_per_day(
     
 @app.get("/users/stats/daily")
 async def number_of_active_users_per_day(
+    start_date: date | None = Query(None, description="วันเริ่มต้น (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="วันสิ้นสุด (YYYY-MM-DD)"),
+    year: int | None = Query(None, ge=2000, le=2100, description="ปีที่ต้องการ (เช่น 2025)"),
+    month: int | None = Query(None, ge=1, le=12, description="เดือนที่ต้องการ (1-12)"),
+    day: int | None = Query(None, ge=1, le=31, description="วันที่ต้องการ (1-31)"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -2530,9 +2665,23 @@ async def number_of_active_users_per_day(
             func.count(func.distinct(Chats.users_id)).label("active_users")
         )
         .where(Chats.sender_type == RoleSender.user)
-        .group_by(cast(Chats.created_at, Date))
-        .order_by(cast(Chats.created_at, Date))
     )
+    
+    # --- Date Range Filter ---
+    if start_date:
+        stmt = stmt.where(cast(Chats.created_at, Date) >= start_date)
+    if end_date:
+        stmt = stmt.where(cast(Chats.created_at, Date) <= end_date)
+    
+    # --- Year / Month / Day Filter ---
+    if year:
+        stmt = stmt.where(func.year(Chats.created_at) == year)
+    if month:
+        stmt = stmt.where(func.month(Chats.created_at) == month)
+    if day:
+        stmt = stmt.where(func.day(Chats.created_at) == day)
+    
+    stmt = stmt.group_by(cast(Chats.created_at, Date)).order_by(cast(Chats.created_at, Date))
 
     result = await db.execute(stmt)
     data = result.all()
@@ -2591,6 +2740,24 @@ async def create_api_key(
             detail=f"Server Error: {str(e)}"
         )
 
+app.post("/auth/api-keys/revoke", status_code=204)
+async def revoke_api_key(
+    payload: ApiKeyRevoke,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # หา key ใน DB
+    stmt = select(ApiKey).where(
+        ApiKey.key_id == payload.key_id,
+        ApiKey.user_id == current_user.users_id
+    )
+    result = await db.execute(stmt)
+    api_key = result.scalar_one_or_none()
+    if not api_key:
+        raise HTTPException(status_code=404, detail="API Key not found")
+    await db.delete(api_key)
+    return
+
 @app.post("/api/v1/chat/completions")
 async def public_chat_api(
     payload: ExternalChatRequest,
@@ -2619,9 +2786,28 @@ async def public_chat_api(
     # 3. ดึงข้อความล่าสุดจาก messages list
     last_user_msg = payload.messages[-1]["content"]
     
-    # 4. เรียก RAG Engine (แบบไม่ใช้ Session ID หรือใช้ ID หลอกๆ เพื่อเลี่ยง Redis error)
-    # หมายเหตุ: อาจต้องปรับ rag_engine.query เล็กน้อยถ้าต้องการส่ง History เข้าไปตรงๆ
-    # แต่เบื้องต้นเอาแบบถามตอบทีละคำถามก่อน
+    if payload.conversation_id:
+        # สร้าง Key แบบ Namespaced เพื่อความปลอดภัยและไม่ชนกับ Internal ID
+        # Format: "api:{user_id}:{client_provided_id}"
+        # user_id มาจาก API Key ทำให้ User อื่นมาเดา ID ของคนนี้ไม่ได้
+        redis_session_key = f"api:{current_user.users_id}:{payload.conversation_id}"
+    else:
+        # ถ้าไม่ส่ง ID มา ให้สุ่ม UUID ใหม่ (หรือจะใช้ "temp_guest" ก็ได้แล้วแต่ design)
+        # แต่ถ้าสุ่มใหม่ = จำ history ไม่ได้ใน request ถัดไป
+        redis_session_key = f"api_temp:{uuid.uuid4()}"
+
+    # 4. เรียก RAG Engine
+    try:
+        # ส่ง redis_session_key ที่เราสร้างเองเข้าไป
+        result = await asyncio.to_thread(
+            rag_engine.query, 
+            question=last_user_msg, 
+            channel_id=real_channel_id, 
+            sessions_id=redis_session_key 
+        )
+    except Exception as e:
+        logger.error(f"RAG Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal AI Error")
     
     try:
         # ใช้ 0 หรือเลขมั่วๆ เป็น session_id ชั่วคราวไปก่อน
@@ -2637,7 +2823,7 @@ async def public_chat_api(
 
     # 5. ตอบกลับรูปแบบ OpenAI Format (มาตรฐานนิยม)
     return {
-        "id": f"chatcmpl-{uuid.uuid4()}",
+        "id": payload.conversation_id or f"chatcmpl-{uuid.uuid4()}",
         "object": "chat.completion",
         "created": int(datetime.now().timestamp()),
         "model": "qwen3:1.7b",
