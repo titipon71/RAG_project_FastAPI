@@ -52,6 +52,49 @@ from rag_enginex import rag_engine
 # from fastapi_limiter.depends import RateLimiter
 # from fastapi.responses import JSONResponse
 
+tags_metadata = [
+    {
+        "name": "Authentication",
+        "description": "การยืนยันตัวตนและการขอ Access Token",
+    },
+    {
+        "name": "Users",
+        "description": "จัดการผู้ใช้งาน (CRUD) และการเปลี่ยนรหัสผ่าน",
+    },
+    {
+        "name": "Channels",
+        "description": "การจัดการห้องแชท (Create, Update, Delete) และสถานะ Public/Private",
+    },
+    {
+        "name": "Files",
+        "description": "การอัปโหลดไฟล์ การลบไฟล์ และการดึงรายการไฟล์",
+    },
+    {
+        "name": "Sessions",
+        "description": "การจัดการ Session การสนทนา",
+    },
+    {
+        "name": "Chat & AI",
+        "description": "การสนทนากับ AI (RAG) และประวัติการคุย",
+    },
+    {
+        "name": "Events & Moderation",
+        "description": "บันทึกเหตุการณ์คำขอเปลี่ยนสถานะ Channel และการอนุมัติโดย Admin",
+    },
+    {
+        "name": "Statistics",
+        "description": "ดูสถิติการใช้งาน (Admin Only)",
+    },
+    {
+        "name": "Public API",
+        "description": "จัดการ API Keys และ Endpoint สำหรับ External Apps",
+    },
+    {
+        "name": "System & Utility",
+        "description": "Health check, Debug และ Demo tools",
+    },
+]
+
 # ============================================================
 #                  CUSTOM COLOR LOGGING (FIXED)
 # ============================================================
@@ -968,7 +1011,7 @@ class ExternalChatRequest(BaseModel):
 #                  APP INITIALIZATION / MIDDLEWARE
 # ============================================================
 
-app = FastAPI(title="FastAPI + MariaDB + JWT")
+app = FastAPI(title="FastAPI + MariaDB + JWT", openapi_tags=tags_metadata)
 templates = Jinja2Templates(directory="templates")
 
 # ---------- File/Static ----------
@@ -1005,15 +1048,15 @@ app.add_middleware(
 # ============================================================
 #                  BASIC / HEALTH ROUTES
 # ============================================================
-@app.get("/",status_code=200,response_class=HTMLResponse)
+@app.get("/", status_code=200, response_class=HTMLResponse, tags=["System & Utility"])
 async def root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-@app.get("/healthz", response_class=PlainTextResponse)
+@app.get("/healthz", response_class=PlainTextResponse, tags=["System & Utility"])
 def healthz_get():
     return "ok"
 
-@app.head("/healthz")
+@app.head("/healthz", tags=["System & Utility"])
 def healthz_head():
     return Response(status_code=200)
 
@@ -1024,11 +1067,11 @@ async def favicon():
     
     return Response(content=image_bytes, media_type="image/png")
 
-@app.head("/")
+@app.head("/", tags=["System & Utility"])
 def root_head():
     return Response(status_code=200)
 
-@app.get("/hashids-demo", response_class=HTMLResponse)
+@app.get("/hashids-demo", response_class=HTMLResponse, tags=["System & Utility"])
 async def read_root(request: Request):
     return templates.TemplateResponse("hashids_demo.html", {
         "request": request,
@@ -1036,7 +1079,7 @@ async def read_root(request: Request):
     })
 
 # 3. POST Route: รวม Logic ทั้ง Encode และ Decode
-@app.post("/hashids-demo", response_class=HTMLResponse)
+@app.post("/hashids-demo", response_class=HTMLResponse, tags=["System & Utility"])
 async def process_hashids(
     request: Request,
     action: str = Form(...),              # ตัวบอกว่ากดปุ่มไหน (encode หรือ decode)
@@ -1081,7 +1124,7 @@ async def scalar_html():
 #                  AUTH ROUTES
 # ============================================================
 # ออก access token ด้วย username/password จาก DB
-@app.post("/auth/token")
+@app.post("/auth/token", tags=["Authentication"])
 async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
     user = await authenticate_user(db, form.username, form.password)
     if not user:
@@ -1096,7 +1139,7 @@ async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = 
 # ============================================================
 # --- CRUD User ---
 # add user
-@app.post("/users", response_model=UserOut, status_code=201)
+@app.post("/users", response_model=UserOut, status_code=201, tags=["Users"])
 async def register_user(payload: UserCreate, db: AsyncSession = Depends(get_db)):
     user = User(
         username=payload.username,
@@ -1115,7 +1158,7 @@ async def register_user(payload: UserCreate, db: AsyncSession = Depends(get_db))
     return user
 
 # Read: Get user by id
-@app.get("/users/{user_id}", response_model=UserOut)
+@app.get("/users/{user_id}", response_model=UserOut, tags=["Users"])
 async def get_user_by_id_api(
     user_id: int = Path(..., gt=0),
     db: AsyncSession = Depends(get_db),
@@ -1130,7 +1173,7 @@ async def get_user_by_id_api(
     return user
 
 # Update: Update user info (username, name, email)
-@app.put("/users/{user_id}", response_model=UserOut)
+@app.put("/users/{user_id}", response_model=UserOut, tags=["Users"])
 async def update_user(
     user_id: int,
     payload: UserUpdate,
@@ -1155,7 +1198,7 @@ async def update_user(
     await db.refresh(user)
     return user
 
-@app.put("/users/password/{user_id}", status_code=204)
+@app.put("/users/password/{user_id}", status_code=204, tags=["Users"])
 async def update_user_password(
     user_id: int = Path(..., gt=0),
     payload: UserPasswordUpdate = Body(...),
@@ -1176,7 +1219,7 @@ async def update_user_password(
     return
 
 # Delete: Delete user
-@app.delete("/users/{user_id}", status_code=204)
+@app.delete("/users/{user_id}", status_code=204, tags=["Users"])
 async def delete_user(
     user_id: int,
     db: AsyncSession = Depends(get_db),
@@ -1190,7 +1233,7 @@ async def delete_user(
     await db.delete(user)
     return
 
-@app.put("/user/role/{user_id}/{new_role}", response_model=UserOut)
+@app.put("/user/role/{user_id}/{new_role}", response_model=UserOut, tags=["Users"])
 async def update_user_role(
     user_id: int = Path(..., gt=0),
     new_role: RoleUser = Path(...),
@@ -1215,7 +1258,7 @@ async def update_user_role(
     return user
 
 # Read: List all users (admin only)
-@app.get("/users/list/", response_model=List[UserOut])
+@app.get("/users/list/", response_model=List[UserOut], tags=["Users"])
 async def list_users(
     skip: int = 0,
     limit: int = 100,
@@ -1230,7 +1273,7 @@ async def list_users(
     return users
 
 # Protected endpoint
-@app.get("/get/userinfo/bytoken")
+@app.get("/get/userinfo/bytoken", tags=["Users"])
 async def get_user_by_token(current_user: User = Depends(get_current_user)):
     return {
         "users_id": current_user.users_id,
@@ -1291,7 +1334,7 @@ async def _save_upload_atomic(uf: UploadFile, final_path: pathlib.Path, max_size
 # ============================================================
 #                  CHANNEL ROUTES
 # ============================================================
-@app.post("/channels", status_code=201, response_model=ChannelResponse)
+@app.post("/channels", status_code=201, response_model=ChannelResponse, tags=["Channels"])
 async def create_channel(
     channel_in: ChannelCreate,  
     db: AsyncSession = Depends(get_db),
@@ -1311,7 +1354,7 @@ async def create_channel(
 
 
 
-@app.get("/channels/{channel_id}", response_model=ChannelOut)
+@app.get("/channels/{channel_id}", response_model=ChannelOut, tags=["Channels"])
 async def get_channel_details(
     channel_id: str, 
     db: AsyncSession = Depends(get_db),
@@ -1358,7 +1401,7 @@ async def get_channel_details(
     }
 
 
-@app.delete("/channels/{channel_id}")
+@app.delete("/channels/{channel_id}", tags=["Channels"])
 async def delete_channel(channel_id: str, db: AsyncSession = Depends(get_db),current_user: User = Depends(get_current_user)):
     decoded_channel_id = decode_id(channel_id)
     # ดึง channel ตาม id
@@ -1398,7 +1441,7 @@ async def delete_channel(channel_id: str, db: AsyncSession = Depends(get_db),cur
     await db.delete(channel)
     return {"message": "Channel deleted successfully"}
 
-@app.put("/channels/{channel_id}", response_model=ChannelUpdateResponse)
+@app.put("/channels/{channel_id}", response_model=ChannelUpdateResponse, tags=["Channels"])
 async def update_channel(
     channel_id: str,
     payload: ChannelUpdate,
@@ -1429,7 +1472,7 @@ async def update_channel(
     
     return channels
 
-@app.get("/channels/{channel_id}/title")
+@app.get("/channels/{channel_id}/title", tags=["Channels"])
 async def get_title_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
     decoded_channel_id = decode_id(channel_id)
     res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
@@ -1440,7 +1483,7 @@ async def get_title_channel(channel_id: str, db: AsyncSession = Depends(get_db))
         "channel_title": channel.title
     }
 
-@app.post("/channels/{channel_id}/request-public", response_model=ModerationResponse, status_code=201)
+@app.post("/channels/{channel_id}/request-public", response_model=ModerationResponse, status_code=201, tags=["Events & Moderation"])
 async def request_make_public(
     channel_id: str,
     db: AsyncSession = Depends(get_db),
@@ -1486,7 +1529,7 @@ async def request_make_public(
         message="Request submitted. Waiting for admin approval."
     )
 
-@app.post("/channels/{channel_id}/cancel-request", response_model=ModerationResponse, status_code=201)
+@app.post("/channels/{channel_id}/cancel-request", response_model=ModerationResponse, status_code=201, tags=["Events & Moderation"])
 async def cancel_request_make_public(
     channel_id: str,
     db: AsyncSession = Depends(get_db),
@@ -1557,7 +1600,7 @@ async def cancel_request_make_public(
         message="Request cancelled. Channel reverted to private."
     )
 
-@app.post("/channels/{channel_id}/moderate-public", response_model=AdminDecisionOut)
+@app.post("/channels/{channel_id}/moderate-public", response_model=AdminDecisionOut, tags=["Events & Moderation"])
 async def approved_rejected_public_request(
     channel_id: str,
     payload: AdminDecisionIn,
@@ -1618,7 +1661,7 @@ async def approved_rejected_public_request(
         message=final_message,
     )
 
-@app.post("/channels/{channel_id}/admin-forced-public", response_model=AdminDecisionOut)
+@app.post("/channels/{channel_id}/admin-forced-public", response_model=AdminDecisionOut, tags=["Events & Moderation"])
 async def admin_forced_this_channel_to_be_public(
     channel_id: str,
     payload: AdminDecisionIn,
@@ -1678,7 +1721,7 @@ async def admin_forced_this_channel_to_be_public(
         message=reason,
     )
 
-@app.post("/channels/{channel_id}/admin-forced-private", response_model=AdminDecisionOut)
+@app.post("/channels/{channel_id}/admin-forced-private", response_model=AdminDecisionOut, tags=["Events & Moderation"])
 async def admin_forced_this_channel_to_be_private(
     channel_id: str,
     payload: AdminDecisionIn,
@@ -1740,7 +1783,7 @@ async def admin_forced_this_channel_to_be_private(
     )
 
 
-@app.post("/channels/{channels_id}/owner-set-private", response_model=ModerationResponse)
+@app.post("/channels/{channels_id}/owner-set-private", response_model=ModerationResponse, tags=["Events & Moderation"])
 async def owner_set_this_channel_private(
     channels_id: str,
     db: AsyncSession = Depends(get_db),
@@ -1812,7 +1855,7 @@ async def owner_set_this_channel_private(
 #         status=channel.status,
 #     )
 
-@app.get("/channels/pending/list/", response_model=List[ChannelListPendingItem])
+@app.get("/channels/pending/list/", response_model=List[ChannelListPendingItem], tags=["Channels"])
 async def list_pending_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
@@ -1868,7 +1911,7 @@ async def list_pending_channels(
     return channel_list
 
 
-@app.get("/channels/public/list/", response_model=List[ChannelListPublicItem])
+@app.get("/channels/public/list/", response_model=List[ChannelListPublicItem], tags=["Channels"])
 async def list_public_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
@@ -1928,7 +1971,7 @@ async def list_public_channels(
 
     return channel_list
 
-@app.get("/channels/list/", response_model=List[ChannelOneResponse])
+@app.get("/channels/list/", response_model=List[ChannelOneResponse], tags=["Channels"])
 async def list_my_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = Query(0, ge=0, description="ข้ามจำนวนรายการ (Pagination)"),
@@ -1984,7 +2027,7 @@ async def list_my_channels(
         ))
     return channel_list
 
-@app.get("/channels/list/all/", response_model=List[ChannelListAllItem])
+@app.get("/channels/list/all/", response_model=List[ChannelListAllItem], tags=["Channels"])
 async def list_all_channels(
     search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
     skip: int = 0,
@@ -2044,7 +2087,7 @@ async def list_all_channels(
 # ============================================================
 #                  FILE ROUTES
 # ============================================================
-@app.get("/files/list/{channel_id}", response_model=FileListItem)
+@app.get("/files/list/{channel_id}", response_model=FileListItem, tags=["Files"])
 async def list_files_in_channel(
     channel_id: str = Path(...),
     db: AsyncSession = Depends(get_db),
@@ -2110,7 +2153,7 @@ async def list_files_in_channel(
     return FileListItem(files=file_list)
 
 # แก้ไขฟังก์ชันนี้ใน main.py
-@app.post("/files/upload", status_code=201, response_model=FileUploadResponse)
+@app.post("/files/upload", status_code=201, response_model=FileUploadResponse, tags=["Files"])
 async def upload_files_only(
     channel_id: str = Form(...),
     files: list[UploadFile] = FastAPIFile(...),
@@ -2232,7 +2275,7 @@ async def upload_files_only(
         raise HTTPException(status_code=500, detail="Upload failed. Please try again.")
 
 
-@app.delete("/files/delete/{file_hash}", status_code=204)
+@app.delete("/files/delete/{file_hash}", status_code=204, tags=["Files"])
 async def delete_file(
     file_hash: str = Path(..., description="Hashed ID of the file"),
     db: AsyncSession = Depends(get_db),
@@ -2321,7 +2364,7 @@ async def delete_file(
         print("="*30)
         raise HTTPException(status_code=500, detail=f"Delete Failed: {str(e)}")
 
-@app.get("/file/count/{channel_id}")
+@app.get("/file/count/{channel_id}", tags=["Files"])
 async def count_files_in_channel(
     channel_id: int,
     db: AsyncSession = Depends(get_db),
@@ -2334,7 +2377,7 @@ async def count_files_in_channel(
 # ============================================================
 #                  SESSION ROUTES
 # ============================================================
-@app.post("/session", status_code=201 , response_model=SessionResponse)
+@app.post("/session", status_code=201, response_model=SessionResponse, tags=["Sessions"])
 async def create_session(
     payload: SessionCreate,
     db: AsyncSession = Depends(get_db),
@@ -2382,7 +2425,7 @@ async def create_session(
     # rag_engine.debug_list_docs_by_channel(new_session.channel_id)
     return new_session
 
-@app.delete("/session/delete/{session_id}", status_code=204)
+@app.delete("/session/delete/{session_id}", status_code=204, tags=["Sessions"])
 async def delete_session(
     session_id: str = Path(..., title="The hashed session ID"), # 1. เปลี่ยนรับเป็น String (Hash)
     db: AsyncSession = Depends(get_db), 
@@ -2412,7 +2455,7 @@ async def delete_session(
 # ============================================================
 #                  CHAT + AI ROUTES
 # ============================================================
-@app.post("/sessions/ollama-reply", status_code=201)
+@app.post("/sessions/ollama-reply", status_code=201, tags=["Chat & AI"])
 async def Talking_with_Ollama_from_document(
     payload: ChatRequest = Body(...),
     db: AsyncSession = Depends(get_db),
@@ -2490,7 +2533,7 @@ async def Talking_with_Ollama_from_document(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/sessions/{session_id}/history", response_model=List[chatHistoryItem])
+@app.get("/sessions/{session_id}/history", response_model=List[chatHistoryItem], tags=["Chat & AI"])
 async def get_chat_history(session_id: str = Path(..., gt=0),
                            db: AsyncSession = Depends(get_db),
                            current_user: User = Depends(get_current_user)
@@ -2530,7 +2573,7 @@ async def get_chat_history(session_id: str = Path(..., gt=0),
 # ============================================================
 #                 EVENT ROUTES
 # ============================================================
-@app.get("/events/list/{user_id}", response_model=List[UserRequestChannelStatusEventResponse])
+@app.get("/events/list/{user_id}", response_model=List[UserRequestChannelStatusEventResponse], tags=["Events & Moderation"])
 async def get_channel_status_events_by_user(
     user_id: int = Path(..., description="ID ของผู้ใช้งาน"),
     skip: int = Query(0, ge=0, description="ข้ามจำนวนรายการ (Pagination)"),
@@ -2598,7 +2641,7 @@ async def get_channel_status_events_by_user(
 # ============================================================
 #                  STATISTICS ROUTES
 # ============================================================
-@app.get("/questions/stats/daily")
+@app.get("/questions/stats/daily", tags=["Statistics"])
 async def number_of_questions_asked_per_day(
     start_date: date | None = Query(None, description="วันเริ่มต้น (YYYY-MM-DD)"),
     end_date: date | None = Query(None, description="วันสิ้นสุด (YYYY-MM-DD)"),
@@ -2645,7 +2688,7 @@ async def number_of_questions_asked_per_day(
         for row in data
     ]
     
-@app.get("/users/stats/daily")
+@app.get("/users/stats/daily", tags=["Statistics"])
 async def number_of_active_users_per_day(
     start_date: date | None = Query(None, description="วันเริ่มต้น (YYYY-MM-DD)"),
     end_date: date | None = Query(None, description="วันสิ้นสุด (YYYY-MM-DD)"),
@@ -2696,7 +2739,7 @@ async def number_of_active_users_per_day(
 # ============================================================
 #                  PUBLIC API ROUTES
 # ============================================================
-@app.post("/auth/api-keys", response_model=ApiKeyResponse)
+@app.post("/auth/api-keys", response_model=ApiKeyResponse, tags=["Public API"])
 async def create_api_key(
     payload: ApiKeyCreate,
     db: AsyncSession = Depends(get_db),
@@ -2740,7 +2783,7 @@ async def create_api_key(
             detail=f"Server Error: {str(e)}"
         )
 
-app.post("/auth/api-keys/revoke", status_code=204)
+@app.post("/auth/api-keys/revoke", status_code=204, tags=["Public API"])
 async def revoke_api_key(
     payload: ApiKeyRevoke,
     db: AsyncSession = Depends(get_db),
@@ -2758,7 +2801,7 @@ async def revoke_api_key(
     await db.delete(api_key)
     return
 
-@app.post("/api/v1/chat/completions")
+@app.post("/api/v1/chat/completions", tags=["Public API"])
 async def public_chat_api(
     payload: ExternalChatRequest,
     db: AsyncSession = Depends(get_db),
@@ -2840,7 +2883,7 @@ async def public_chat_api(
 # ============================================================
 #                  DEBUG / UTIL ROUTES
 # ============================================================
-@app.post("/debug")
+@app.post("/debug", tags=["System & Utility"])
 def debug_endpoint(
     channel_id: int = Body(..., embed=True)
 ):
