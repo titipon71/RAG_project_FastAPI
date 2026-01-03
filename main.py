@@ -1120,6 +1120,37 @@ async def scalar_html():
         openapi_url=app.openapi_url,
     )
 
+@app.get("/rapidoc", include_in_schema=False)
+async def rapidoc():
+    html_content = """
+    <!doctype html>
+    <html>
+    <head>
+        <title>RapiDoc</title>
+        <meta charset="utf-8">
+        <script type="module" src="https://unpkg.com/rapidoc/dist/rapidoc-min.js"></script>
+    </head>
+    <body>
+        <rapi-doc 
+            spec-url="/openapi.json"
+            theme="dark" 
+            allow-try="true"
+            allow-server-selection="false"
+            show-header="false"
+            render-style="focused"
+            primary-color="#34A853"
+            nav-spacing="relaxed"
+            show-method-in-nav-bar="as-colored-block"
+            font-size="largest"
+            show-info="false"
+            allow-spec-url-load="false"
+        > 
+        </rapi-doc>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
 # ============================================================
 #                  AUTH ROUTES
 # ============================================================
@@ -2807,13 +2838,11 @@ async def public_chat_api(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_user_by_api_key) # ใช้ API Key แทน Login
 ):
-    # 1. แปลง Channel ID
     real_channel_id = decode_id(payload.channel_id)
     if not real_channel_id:
         raise HTTPException(status_code=404, detail="Invalid Channel ID")
 
-    # 2. ตรวจสอบสิทธิ์ (User เจ้าของ Key เป็นเจ้าของ Channel หรือ Admin หรือไม่)
-    # (หรือถ้าอยากให้ Public Channel ใครใช้ก็ได้ ก็ปรับ Logic ตรงนี้)
+
     stmt = select(Channel).where(Channel.channels_id == real_channel_id)
     res = await db.execute(stmt)
     channel = res.scalar_one_or_none()
@@ -2822,26 +2851,17 @@ async def public_chat_api(
         raise HTTPException(status_code=404, detail="Channel not found")
         
     if channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
-        # อนุโลม: ถ้า Channel เป็น Public ให้ใช้ได้เลยไหม? แล้วแต่ Design
         if channel.status != RoleChannel.public:
              raise HTTPException(status_code=403, detail="Access denied to this channel")
 
-    # 3. ดึงข้อความล่าสุดจาก messages list
     last_user_msg = payload.messages[-1]["content"]
     
     if payload.conversation_id:
-        # สร้าง Key แบบ Namespaced เพื่อความปลอดภัยและไม่ชนกับ Internal ID
-        # Format: "api:{user_id}:{client_provided_id}"
-        # user_id มาจาก API Key ทำให้ User อื่นมาเดา ID ของคนนี้ไม่ได้
         redis_session_key = f"api:{current_user.users_id}:{payload.conversation_id}"
     else:
-        # ถ้าไม่ส่ง ID มา ให้สุ่ม UUID ใหม่ (หรือจะใช้ "temp_guest" ก็ได้แล้วแต่ design)
-        # แต่ถ้าสุ่มใหม่ = จำ history ไม่ได้ใน request ถัดไป
         redis_session_key = f"api_temp:{uuid.uuid4()}"
 
-    # 4. เรียก RAG Engine
     try:
-        # ส่ง redis_session_key ที่เราสร้างเองเข้าไป
         result = await asyncio.to_thread(
             rag_engine.query, 
             question=last_user_msg, 
@@ -2851,20 +2871,8 @@ async def public_chat_api(
     except Exception as e:
         logger.error(f"RAG Error: {e}")
         raise HTTPException(status_code=500, detail="Internal AI Error")
-    
-    try:
-        # ใช้ 0 หรือเลขมั่วๆ เป็น session_id ชั่วคราวไปก่อน
-        result = await asyncio.to_thread(
-            rag_engine.query, 
-            question=last_user_msg, 
-            channel_id=real_channel_id, 
-            sessions_id=0 
-        )
-    except Exception as e:
-        logger.error(f"RAG Error: {e}")
-        raise HTTPException(status_code=500, detail="Internal AI Error")
 
-    # 5. ตอบกลับรูปแบบ OpenAI Format (มาตรฐานนิยม)
+    # ตอบกลับรูปแบบ OpenAI Format (มาตรฐานนิยม)
     return {
         "id": payload.conversation_id or f"chatcmpl-{uuid.uuid4()}",
         "object": "chat.completion",
