@@ -1151,6 +1151,13 @@ async def rapidoc():
     """
     return HTMLResponse(content=html_content)
 
+@app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
+def robots_txt():
+    date = """User-agent: *
+Disallow: /"""
+    return date
+
+
 # ============================================================
 #                  AUTH ROUTES
 # ============================================================
