@@ -36,3 +36,6 @@ chroma_db/
 # files storage
 uploads/
 trash/
+
+# commands
+run.md

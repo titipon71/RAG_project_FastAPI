@@ -10,6 +10,7 @@ from http import HTTPStatus
 import json
 import logging
 import shutil
+import traceback
 from typing import Annotated, Optional, AsyncGenerator, List
 # from urllib import response
 from unittest import result
@@ -23,7 +24,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel , EmailStr, WithJsonSchema, field_validator, Field
 from pydantic_settings import BaseSettings
-from sqlalchemy import Boolean, Date, String, cast, desc, func, select ,Enum as SAEnum, ForeignKey, text
+from sqlalchemy import Boolean, Date, String, cast, desc, func, select ,Enum as SAEnum, ForeignKey, text, update
 from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, joinedload, relationship, selectinload
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
@@ -37,7 +38,7 @@ from sqlalchemy.dialects.mysql import INTEGER as MyInt, ENUM as MyEnum
 from fastapi.middleware.cors import CORSMiddleware
 import os, secrets
 from llama_index.core import SimpleDirectoryReader
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 import sys
@@ -308,6 +309,7 @@ class Channel(Base):
     files = relationship("File", back_populates="channel",cascade="all, delete-orphan")
     creator = relationship("User", back_populates="channels")
     status_events = relationship("ChannelStatusEvent", back_populates="channel",cascade="all, delete-orphan")
+    sessions = relationship("Sessions", back_populates="channel",cascade="all, delete-orphan")
     
 class User(Base):
     __tablename__ = "users"
@@ -366,6 +368,7 @@ class User(Base):
     
     channels = relationship("Channel", back_populates="creator")
     uploaded_files = relationship("File", back_populates="uploader")
+    
 class File(Base):
     __tablename__ = "files"
     files_id: Mapped[int] = mapped_column("files_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
@@ -381,9 +384,12 @@ class File(Base):
 class Sessions(Base):
     __tablename__ = "sessions"
     sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), primary_key=True, autoincrement=True)
-    channel_id: Mapped[int] = mapped_column("channel_id", MyInt(unsigned=True), nullable=True)
-    user_id: Mapped[int] = mapped_column("user_id", MyInt(unsigned=True), nullable=False)
+    channel_id: Mapped[int] = mapped_column("channel_id", MyInt(unsigned=True),ForeignKey("channels.channels_id"), nullable=False)
+    user_id: Mapped[Optional[int]] = mapped_column("user_id", MyInt(unsigned=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
+    
+    channel = relationship("Channel", back_populates="sessions")
+    
 
 class Chats(Base):
     __tablename__ = "chats"
@@ -429,7 +435,7 @@ class ChannelStatusEvent(Base):
         nullable=False,
     )
 
-    requested_by: Mapped[int] = mapped_column(
+    requested_by: Mapped[Optional[int]] = mapped_column(
         "requested_by",
         MyInt(unsigned=True),
         ForeignKey(
@@ -461,6 +467,14 @@ class ChannelStatusEvent(Base):
         "decision_reason",
         String(1000),
         nullable=True,
+    )
+    
+    is_read: Mapped[bool] = mapped_column(
+        "is_read",
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0"
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -683,9 +697,7 @@ async def call_ai(messages: List[dict], channel_id: int, session_id: int) -> dic
     if last_user_msg is None:
         last_user_msg = "สรุปข้อมูลจากฐานเอกสารให้หน่อย"
 
-    loop = asyncio.get_running_loop()
-    # ตรงนี้จะได้ dict กลับมาแทน str
-    result = await loop.run_in_executor(None, rag_engine.query, last_user_msg, channel_id, session_id)
+    result = await rag_engine.aquery(last_user_msg, channel_id, session_id)
     return result
 
 async def get_latest_pending_event( db: AsyncSession, channel_id: int) -> Optional[ChannelStatusEvent]:
@@ -868,7 +880,7 @@ class SessionCreate(BaseModel):
 class SessionResponse(ORMBase):
     sessions_id: str
     channel_id: str
-    user_id: int
+    user_id: Optional[int] = None
     created_at: datetime
     
     @field_validator('sessions_id', mode='before')
@@ -1007,6 +1019,11 @@ class ExternalChatRequest(BaseModel):
             ]
         }
     }
+
+# --- Events schemas ---
+class EventsAsReadRequest(ORMBase):
+    event_id: int
+    
 # ============================================================
 #                  APP INITIALIZATION / MIDDLEWARE
 # ============================================================
@@ -1509,17 +1526,6 @@ async def update_channel(
     await db.refresh(channels)
     
     return channels
-
-@app.get("/channels/{channel_id}/title", tags=["Channels"])
-async def get_title_channel(channel_id: str, db: AsyncSession = Depends(get_db)):
-    decoded_channel_id = decode_id(channel_id)
-    res = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
-    channel = res.scalar_one_or_none()
-    if not channel:
-        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
-    return {
-        "channel_title": channel.title
-    }
 
 @app.post("/channels/{channel_id}/request-public", response_model=ModerationResponse, status_code=201, tags=["Events & Moderation"])
 async def request_make_public(
@@ -2401,17 +2407,64 @@ async def delete_file(
         print(f"Error Message: {e}")
         print("="*30)
         raise HTTPException(status_code=500, detail=f"Delete Failed: {str(e)}")
-
-@app.get("/file/count/{channel_id}", tags=["Files"])
-async def count_files_in_channel(
-    channel_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    stmt = select(func.count(File.files_id)).where(File.channel_id == channel_id)
-    result = await db.execute(stmt)
-    count = result.scalar_one()
-    return {"channel_id": channel_id, "file_count": count}
     
+@app.get("/files/download/{file_hash}", tags=["Files"])
+async def download_file(
+    file_hash: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user), # ใช้ Optional เพื่อให้ Guest โหลดไฟล์ Public ได้
+):
+    # 1. Decode File ID
+    file_id = decode_id(file_hash)
+    if file_id is None:
+        raise HTTPException(status_code=404, detail="File ID ไม่ถูกต้อง")
+
+    # 2. Query ไฟล์พร้อม Channel เพื่อเช็คสิทธิ์
+    stmt = (
+        select(File)
+        .options(joinedload(File.channel)) # Join เพื่อเอาสถานะ Channel มาเช็ค
+        .where(File.files_id == file_id)
+    )
+    result = await db.execute(stmt)
+    file_obj = result.scalar_one_or_none()
+
+    if not file_obj:
+        raise HTTPException(status_code=404, detail="ไม่พบไฟล์ในระบบ")
+
+    # 3. ตรวจสอบสิทธิ์ (Security Check)
+    # ---------------------------------------------------
+    channel = file_obj.channel
+    is_public = (channel.status == RoleChannel.public)
+    
+    # ถ้าไม่ใช่ Public Channel ต้อง Login และต้องเป็น (เจ้าของ หรือ Admin)
+    if not is_public:
+        if not current_user:
+            raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบเพื่อดาวน์โหลดไฟล์นี้")
+        
+        is_owner = (file_obj.uploaded_by == current_user.users_id)
+        # เช็คด้วยว่าเป็นเจ้าของ Channel หรือไม่ (เผื่อไฟล์ถูกอัปโดยคนอื่นใน Channel - ถ้ามีฟีเจอร์นี้ในอนาคต)
+        is_channel_owner = (channel.created_by == current_user.users_id)
+        is_admin = (current_user.role == RoleUser.admin)
+
+        if not (is_owner or is_channel_owner or is_admin):
+            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดาวน์โหลดไฟล์นี้")
+
+    # 4. เตรียม Path ไฟล์
+    # ---------------------------------------------------
+    file_path = UPLOAD_ROOT / file_obj.storage_uri
+    
+    # ตรวจสอบว่าไฟล์มีอยู่จริงใน Disk ไหม
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="ไฟล์สูญหายจาก Server (File Not Found on Disk)")
+
+    # 5. ส่งไฟล์กลับ (FileResponse จะจัดการเรื่อง Header ให้เอง)
+    # media_type ถ้าไม่ระบุ Browser จะพยายามเดาเอง
+    # filename=... จะทำให้ Browser เด้งหน้าต่าง Save As เป็นชื่อไฟล์เดิม
+    return FileResponse(
+        path=file_path, 
+        filename=file_obj.original_filename,
+        media_type="application/octet-stream" # บังคับให้ Download (ถ้าอยากให้เปิดใน Browser ให้แก้ตาม MIME type)
+    )
 # ============================================================
 #                  SESSION ROUTES
 # ============================================================
@@ -2419,11 +2472,10 @@ async def count_files_in_channel(
 async def create_session(
     payload: SessionCreate,
     db: AsyncSession = Depends(get_db),
+    # 👇 ใช้ Optional ตรงนี้ด้วย
     current_user: Optional[User] = Depends(get_optional_current_user),
 ):
-    # print(payload.channel_id)
-    
-    # 1) หา channel ก่อน
+    # 1) หา channel
     result = await db.execute(
         select(Channel).where(Channel.channels_id == payload.channel_id)
     )
@@ -2433,34 +2485,30 @@ async def create_session(
 
     user_id = current_user.users_id if current_user else None
     
-    # 2) เช็คสิทธิ์ (Permission Logic)
+    # 2) เช็คสิทธิ์
     if user_id:
-        # --- กรณีเป็นสมาชิก (Logged-in User) ---
+        # กรณี User: เข้าได้ถ้าเป็นเจ้าของ, แอดมิน หรือ ห้อง public
         is_admin = (current_user.role == RoleUser.admin)
         is_owner = (channel.created_by == user_id)
-        is_private_access = (is_owner or is_admin)
         
-        # ถ้าเป็น private/pending และไม่ใช่เจ้าของ/admin -> ห้ามเข้า
-        if channel.status in (RoleChannel.private, RoleChannel.pending) and not is_private_access:
+        if channel.status in (RoleChannel.private, RoleChannel.pending) and not (is_owner or is_admin):
             raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์เข้าถึง Channel นี้")
     else:
-        # --- กรณีเป็น Guest (ไม่ได้ Login) ---
-        # อนุญาตเฉพาะ Public Channel เท่านั้น
+        # กรณี Guest: เข้าได้เฉพาะ Public เท่านั้น
         if channel.status != RoleChannel.public:
             raise HTTPException(
-                status_code=401, # หรือ 403
+                status_code=401, 
                 detail="กรุณาเข้าสู่ระบบเพื่อใช้งาน Channel ส่วนตัว"
             )
 
-    # 3) สร้าง session ใหม่
+    # 3) สร้าง session (user_id จะเป็น None ถ้าเป็น Guest)
     new_session = Sessions(
         channel_id=payload.channel_id,
-        user_id=user_id,
+        user_id=user_id, 
     )
     db.add(new_session)
     await db.flush()
     await db.refresh(new_session)
-    # rag_engine.debug_list_docs_by_channel(new_session.channel_id)
     return new_session
 
 @app.delete("/session/delete/{session_id}", status_code=204, tags=["Sessions"])
@@ -2497,26 +2545,52 @@ async def delete_session(
 async def Talking_with_Ollama_from_document(
     payload: ChatRequest = Body(...),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # รับได้ทั้ง User และ None (Guest)
+    current_user: Optional[User] = Depends(get_optional_current_user),
 ):
     try:
-        # 1) เช็คว่า session เป็นของ user นี้
-        sess_stmt = (
-            select(Sessions)
-            .where(
-                Sessions.sessions_id == payload.sessions_id,
-                Sessions.user_id == current_user.users_id,
-            )
-        )
-        sess_res = await db.execute(sess_stmt)
-        sess = sess_res.scalar_one_or_none()
-        if sess is None:
-            raise HTTPException(status_code=403, detail="ไม่ใช่ Session ของคุณ")
+        real_session_id = payload.sessions_id
+        if isinstance(real_session_id, str):
+             real_session_id = decode_id(real_session_id)
 
-        # 2) เซฟข้อความ user
+        # -------------------------------------------------------
+        # STEP 1: ค้นหา Session และ Join Channel ในคำสั่งเดียว
+        # -------------------------------------------------------
+        stmt = (
+            select(Sessions)
+            .options(joinedload(Sessions.channel)) # 👈 ใช้ joinedload ได้แล้ว
+            .where(Sessions.sessions_id == real_session_id)
+        )
+
+        # Filter เจ้าของ Session
+        if current_user:
+            stmt = stmt.where(Sessions.user_id == current_user.users_id)
+        else:
+            stmt = stmt.where(Sessions.user_id.is_(None)) # Guest ต้องเป็น NULL
+
+        res = await db.execute(stmt)
+        sess = res.scalar_one_or_none()
+
+        if sess is None:
+            raise HTTPException(status_code=403, detail="ไม่พบ Session หรือคุณไม่มีสิทธิ์")
+
+        # -------------------------------------------------------
+        # STEP 2: ตรวจสอบสถานะ Channel (เข้าถึงผ่าน sess.channel ได้เลย)
+        # -------------------------------------------------------
+        # ถ้าเป็น Guest เข้าได้เฉพาะ Public Channel
+        if not current_user:
+             if sess.channel.status != RoleChannel.public:
+                 raise HTTPException(status_code=401, detail="Guest ใช้ได้เฉพาะ Public Channel เท่านั้น")
+
+        # -------------------------------------------------------
+        # STEP 3: Logic การบันทึกและตอบกลับ (เหมือนเดิม)
+        # -------------------------------------------------------
+        sender_id = current_user.users_id if current_user else None
+
+        # 1. Save User Message
         user_chat = Chats(
             channels_id=sess.channel_id,
-            users_id=current_user.users_id,
+            users_id=sender_id,
             sessions_id=sess.sessions_id,
             message=payload.message,
             sender_type=RoleSender.user,
@@ -2525,30 +2599,22 @@ async def Talking_with_Ollama_from_document(
         await db.flush()
         await db.refresh(user_chat)
 
-        # ⚡️ 3) ส่งเฉพาะข้อความล่าสุดไปยัง AI
-        ai_messages = [
-            {"role": "user", "content": payload.message}
-        ]
-
-        # 4) เรียก RAG / AI
+        # 2. Call AI
+        ai_messages = [{"role": "user", "content": payload.message}]
         ai_result = await call_ai(ai_messages, sess.channel_id, sess.sessions_id)
 
-        ai_text = ai_result["answer"]
-        usage = ai_result["usage"] # จำนวน token
-        
-        # 5) เซฟคำตอบ AI
+        # 3. Save AI Message
         ai_chat = Chats(
             channels_id=sess.channel_id,
-            users_id=current_user.users_id,
+            users_id=sender_id,
             sessions_id=sess.sessions_id,
-            message=ai_text,
+            message=ai_result["answer"],
             sender_type=RoleSender.AI,
         )
         db.add(ai_chat)
         await db.flush()
         await db.refresh(ai_chat)
 
-        # 6) ส่งกลับ
         return {
             "user_message": {
                 "chat_id": user_chat.chat_id,
@@ -2562,12 +2628,13 @@ async def Talking_with_Ollama_from_document(
                 "sender_type": ai_chat.sender_type,
                 "created_at": ai_chat.created_at,
             },
-            "token_usage": usage
+            "token_usage": ai_result["usage"]
         }
+
     except HTTPException as he:
         raise he
     except Exception as e:
-        print("OLLAMA ERROR:", e)
+        logger.error(f"Ollama Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2676,6 +2743,43 @@ async def get_channel_status_events_by_user(
             detail="เกิดข้อผิดพลาดภายในระบบ ไม่สามารถดึงข้อมูลได้ในขณะนี้"
         )
 
+import traceback # <--- เพิ่มบรรทัดนี้ด้านบนสุดของไฟล์ด้วยครับ
+
+# ...
+
+@app.post("/events/read", status_code=204, tags=["Events & Moderation"])
+async def events_as_read(
+    payload: EventsAsReadRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:        
+        stmt = (
+            update(ChannelStatusEvent)
+            .where(ChannelStatusEvent.event_id == payload.event_id)
+            .where(ChannelStatusEvent.requested_by == current_user.users_id)
+            .values(is_read=True) 
+        )
+        
+        result = await db.execute(stmt)
+        
+        if result.rowcount == 0:
+            print(f"DEBUG: No rows updated. Event ID {payload.event_id} not found or user mismatch.")
+            # ถ้าไม่เจอ ถือว่าไม่มีอะไรผิดพลาดร้ายแรง แค่หาไม่เจอ
+            raise HTTPException(status_code=404, detail="Event not found")
+            
+        print("DEBUG: Update successful!")
+        
+    except Exception as e:
+        # พิมพ์ Error ออกมาดู
+        print("################ ERROR DETAILS ################")
+        print(traceback.format_exc()) 
+        print("###############################################")
+        raise HTTPException(status_code=500, detail=str(e)) # ส่ง error text กลับไปที่ client ด้วย
+
+    return
+    
+    
 # ============================================================
 #                  STATISTICS ROUTES
 # ============================================================

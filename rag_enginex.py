@@ -139,6 +139,8 @@ class OllamaTokenHandler(BaseCallbackHandler):
 # ==========================================
 class RAGService:
     def __init__(self):
+        self.chat_engines = {}
+        
         # ใส่สี [bold cyan] เพื่อความสวยงาม
         logger.info("[bold cyan]🚀 Initializing RAG Service...[/]")
         self._ensure_directories()
@@ -256,6 +258,42 @@ class RAGService:
         text = re.sub(r"(?i)(^|\n)\s*(analysis:|reasoning:|thoughts?:).*?(?=\n\n|\Z)", "", text, flags=re.DOTALL)
         return text.strip()
 
+    def _get_chat_engine(self, channel_id: str, session_id: Union[str, int, None]):
+        # 1. สร้าง Key สำหรับอ้างอิง (รวม channel_id และ session_id)
+        user_key = str(session_id) if session_id else "global_guest"
+        engine_key = f"{channel_id}_{user_key}"
+        
+        # 2. ถ้ามี Engine นี้อยู่แล้ว ให้คืนค่ากลับไปเลย (Reuse)
+        if engine_key in self.chat_engines:
+            return self.chat_engines[engine_key]
+            
+        # 3. ถ้ายังไม่มี ให้สร้างใหม่ (Logic เดิมย้ายมาไว้ที่นี่)
+        logger.info(f"Creating new ChatEngine for key: {engine_key}")
+        
+        filters = MetadataFilters(
+            filters=[ExactMatchFilter(key="channel_id", value=str(channel_id))]
+        )
+        
+        memory = ChatMemoryBuffer.from_defaults(
+            token_limit=3000,
+            chat_store=self.chat_store,
+            chat_store_key=user_key
+        )
+        
+        # สร้าง Engine
+        new_engine = self.index.as_chat_engine(
+            chat_mode="context",
+            memory=memory,
+            similarity_top_k=config.TOP_K,
+            filters=filters,
+            llm=self.llm,
+            response_mode="compact",
+        )
+        
+        # 4. เก็บลง Cache แล้วคืนค่า
+        self.chat_engines[engine_key] = new_engine
+        return new_engine
+    
     # --- Public Methods ---
 
     def add_documents(self, docs: List[Document]):
@@ -301,33 +339,13 @@ class RAGService:
             logger.error(f"[bold red]❌ Failed to clear history for {user_key}:[/]\n{e}")
 
     
-    def query(self, question: str, channel_id: Union[str, int], sessions_id: Union[str, int, None] = None) -> Dict[str, Any]:
+    async def aquery(self, question: str, channel_id: Union[str, int], sessions_id: Union[str, int, None] = None) -> Dict[str, Any]:
             logger.info(f"Querying: [bold cyan]{question}[/] (Channel: {channel_id})")
             self.token_handler.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            filters = MetadataFilters(
-                filters=[ExactMatchFilter(key="channel_id", value=str(channel_id))]
-            )
             
-            user_key = str(sessions_id) if sessions_id else "global_guest"
-            
-            logger.info(f"Using Chat Store Key: {user_key}")
+            chat_engine = self._get_chat_engine(str(channel_id), sessions_id)
 
-            memory = ChatMemoryBuffer.from_defaults(
-                token_limit=3000,
-                chat_store=self.chat_store,  
-                chat_store_key=user_key     
-            )
-            
-            chat_engine = self.index.as_chat_engine(
-                chat_mode="context",
-                memory=memory,
-                similarity_top_k=config.TOP_K,
-                filters=filters,
-                llm=self.llm,                
-                response_mode="compact",
-            )
-
-            response = chat_engine.chat(question)
+            response = await chat_engine.achat(question)
             
             # 1. ดึงข้อความคำตอบ
             answer_text = self._strip_think(str(response))
