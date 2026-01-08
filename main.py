@@ -2196,7 +2196,6 @@ async def list_files_in_channel(
 
     return FileListItem(files=file_list)
 
-# แก้ไขฟังก์ชันนี้ใน main.py
 @app.post("/files/upload", status_code=201, response_model=FileUploadResponse, tags=["Files"])
 async def upload_files_only(
     channel_id: str = Form(...),
@@ -2204,7 +2203,6 @@ async def upload_files_only(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    import traceback  # import เพื่อใช้ดู error
     try:
         real_channel_id = decode_id(channel_id)
         if real_channel_id is None:
@@ -2274,7 +2272,8 @@ async def upload_files_only(
                     d.metadata["files_id"] = str(frow.files_id)
 
                 # เติมเอกสารลงคอลเลกชันเดิม
-                rag_engine.add_documents(docs)
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, rag_engine.add_documents, docs)
                 print("DEBUG: RAG Engine ทำงานสำเร็จ")
 
             except Exception as rag_err:
@@ -2325,7 +2324,6 @@ async def delete_file(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    import traceback # เรียกตัวช่วยดู error
     try:
         # ==========================================
         # 1. VALIDATION PHASE (ตรวจสอบความถูกต้อง)
@@ -2442,7 +2440,7 @@ async def download_file(
             raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบเพื่อดาวน์โหลดไฟล์นี้")
         
         is_owner = (file_obj.uploaded_by == current_user.users_id)
-        # เช็คด้วยว่าเป็นเจ้าของ Channel หรือไม่ (เผื่อไฟล์ถูกอัปโดยคนอื่นใน Channel - ถ้ามีฟีเจอร์นี้ในอนาคต)
+        # เช็คด้วยว่าเป็นเจ้าของ Channel หรือไม่
         is_channel_owner = (channel.created_by == current_user.users_id)
         is_admin = (current_user.role == RoleUser.admin)
 
@@ -2744,8 +2742,6 @@ async def get_channel_status_events_by_user(
         )
 
 import traceback # <--- เพิ่มบรรทัดนี้ด้านบนสุดของไฟล์ด้วยครับ
-
-# ...
 
 @app.post("/events/read", status_code=204, tags=["Events & Moderation"])
 async def events_as_read(
