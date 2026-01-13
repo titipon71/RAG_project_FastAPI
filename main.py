@@ -15,7 +15,7 @@ from typing import Annotated, Optional, AsyncGenerator, List
 # from urllib import response
 from unittest import result
 import uuid, pathlib
-import aiofiles
+import aiofiles 
 from fastapi import Body, FastAPI, APIRouter, Depends, File as FastAPIFile, Form, UploadFile, HTTPException, status, Query, Path , Request, Response
 from fastapi.concurrency import asynccontextmanager
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm , APIKeyHeader
@@ -142,7 +142,6 @@ class CustomColorFormatter(logging.Formatter):
 
             client_addr_fmt = f"{self.MAGENTA}{client_addr}{self.RESET}"
 
-            # --- ส่วนที่แก้ไข: จัดการ Status Text ให้ละเอียดขึ้น ---
             
             # กำหนดสีตาม Range ของ Status Code
             if status_code < 200:
@@ -174,7 +173,6 @@ class CustomColorFormatter(logging.Formatter):
 
         return f"{time_str} {level_str} {message}"
 
-# --- เรียกใช้งาน ---
 custom_formatter = CustomColorFormatter()
 logger = logging.getLogger("uvicorn.error")
 # 1. แทนที่ Uvicorn Access Logger
@@ -499,7 +497,7 @@ class ApiKey(Base):
     # ผูกกับ User เจ้าของ Key
     user_id: Mapped[int] = mapped_column(MyInt(unsigned=True), ForeignKey("users.users_id"), nullable=False)
     
-    # เก็บ Key ที่ Hash แล้ว (เพื่อความปลอดภัย ถ้า DB หลุด Key จริงก็ไม่หลุด)
+    # เก็บ Key ที่ Hash แล้ว
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     
     # ชื่อเรียก Key เช่น "My Chatbot A"
