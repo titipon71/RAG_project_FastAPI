@@ -15,7 +15,7 @@
 * **Language:** Python 3.9+
 * **Web Framework:** FastAPI
 * **RAG Framework:** LlamaIndex
-* **Vector Database:** ChromaDB / FAISS / Qdrant *(กรุณาตรวจสอบและแก้ไขให้ตรงกับที่คุณใช้)*
+* **Vector Database:** ChromaDB / FAISS / Qdrant
 * **LLM Provider:** Ollama
 
 ## ⚙️ การติดตั้ง (Installation)

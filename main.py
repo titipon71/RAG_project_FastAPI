@@ -11,7 +11,7 @@ import json
 import logging
 import shutil
 import traceback
-from typing import Annotated, Optional, AsyncGenerator, List
+from typing import Annotated, Optional, AsyncGenerator, List, Tuple
 # from urllib import response
 from unittest import result
 import uuid, pathlib
@@ -243,10 +243,6 @@ class RoleChannel(str, enum.Enum):
     private = "private"
     pending = "pending"
 
-class RoleSender(str, enum.Enum):
-    user = "user"
-    AI = "AI"
-
 class Theme(str, enum.Enum):
     light = "light"
     dark = "dark"
@@ -395,8 +391,8 @@ class Chats(Base):
     channels_id: Mapped[int] = mapped_column("channels_id", MyInt(unsigned=True), nullable=False)
     users_id: Mapped[int] = mapped_column("users_id", MyInt(unsigned=True), nullable=True)
     sessions_id: Mapped[int] = mapped_column("sessions_id", MyInt(unsigned=True), nullable=False)
-    message: Mapped[str] = mapped_column("message", String(2000), nullable=False)
-    sender_type: Mapped[RoleSender] = mapped_column("sender_type", MyEnum(RoleSender), nullable=False ,)
+    user_message: Mapped[str] = mapped_column("user_message", String(2000), nullable=False)
+    ai_message: Mapped[Optional[str]] = mapped_column("ai_message", String(2000), nullable=True)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
 
@@ -497,6 +493,8 @@ class ApiKey(Base):
     # ผูกกับ User เจ้าของ Key
     user_id: Mapped[int] = mapped_column(MyInt(unsigned=True), ForeignKey("users.users_id"), nullable=False)
     
+    channel_id: Mapped[Optional[int]] = mapped_column(MyInt(unsigned=True), ForeignKey("channels.channels_id"), nullable=True)
+    
     # เก็บ Key ที่ Hash แล้ว
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     
@@ -509,7 +507,7 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.current_timestamp())
 
     owner = relationship("User", backref="api_keys")
-    
+    channel = relationship("Channel", backref="api_keys")
 
 # ============================================================
 #                      DB ENGINE & SESSION
@@ -658,16 +656,17 @@ def hash_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 # Dependency เอาไว้ใช้ใน Router
-async def get_user_by_api_key(
+async def get_api_key_context(
     key: str = Depends(api_key_header), 
     db: AsyncSession = Depends(get_db)
-) -> User:
+) -> Tuple[User, ApiKey]:
+    
     if not key:
         raise HTTPException(status_code=403, detail="API Key is missing")
 
     hashed = hash_key(key)
 
-    # ค้นหาใน DB
+    # 1. ค้นหา Key ที่ Active อยู่
     stmt = select(ApiKey).where(ApiKey.key_hash == hashed, ApiKey.is_active == True)
     result = await db.execute(stmt)
     api_key_obj = result.scalar_one_or_none()
@@ -675,12 +674,16 @@ async def get_user_by_api_key(
     if not api_key_obj:
         raise HTTPException(status_code=401, detail="Invalid or Inactive API Key")
 
-    # ถ้าเจอ Key ให้ดึง User เจ้าของ Key ออกมา
+    # 2. ดึง User เจ้าของ Key (หรือจะใช้ joinedload ตั้งแต่ query บนก็ได้)
     user_stmt = select(User).where(User.users_id == api_key_obj.user_id)
     user_res = await db.execute(user_stmt)
     user = user_res.scalar_one_or_none()
+    
+    if not user:
+         raise HTTPException(status_code=401, detail="User not found")
 
-    return user
+    # ส่งกลับทั้งคู่
+    return user, api_key_obj
 
 # ============================================================
 #                      RAG / AI HELPERS
@@ -917,8 +920,8 @@ class chatHistoryItem(ORMBase):
     channels_id: str
     users_id: int
     sessions_id: str # ควรเป็น str (hash) ถ้าอยากปกปิด
-    message: str
-    sender_type: RoleSender
+    user_message: str
+    ai_message: Optional[str] = None
     created_at: datetime
     
     @field_validator('channels_id', mode='before')
@@ -985,6 +988,8 @@ class UserRequestChannelStatusEventResponse(ORMBase):
 # --- Public API Key Schemas ---
 class ApiKeyCreate(BaseModel):
     name: str
+    channel_id: Optional[str] = None
+    
 
 class ApiKeyRevoke(BaseModel):
     key_id: int = Field(..., description="ID ของ API Key ที่ต้องการเพิกถอน")
@@ -992,7 +997,14 @@ class ApiKeyRevoke(BaseModel):
 # Schema สำหรับส่ง Key กลับ (แสดง key_secret แค่ครั้งเดียว)
 class ApiKeyResponse(BaseModel):
     name: str
+    channel_id: str | None = None
     key_secret: str # Key จริงที่ยังไม่ Hash
+    created_at: datetime
+
+class ApiKeyListResponse(BaseModel):
+    name: str
+    channel_id: Optional[str]
+    key_hint: str      # ⬅️ ไม่เรียก secret
     created_at: datetime
 
 class ExternalChatRequest(BaseModel):
@@ -1043,7 +1055,9 @@ app.add_middleware(
                    "http://127.0.0.1:5500",
                    "https://lukeenortaed.site", 
                    "https://www.lukeenortaed.site",
-                   "https://*.ngrok-free.app"],
+                   "https://*.ngrok-free.app",
+                   "https://project-rag-frontend.vercel.app",
+                   "https://docsmind-rag.lukeenortaed.site"],
     allow_origin_regex=r"https://.*\.ngrok-free\.app",
     allow_credentials=True,
     allow_methods=["*"],
@@ -2579,50 +2593,34 @@ async def Talking_with_Ollama_from_document(
                  raise HTTPException(status_code=401, detail="Guest ใช้ได้เฉพาะ Public Channel เท่านั้น")
 
         # -------------------------------------------------------
-        # STEP 3: Logic การบันทึกและตอบกลับ (เหมือนเดิม)
+        # STEP 3: Logic การบันทึกและตอบกลับ
         # -------------------------------------------------------
         sender_id = current_user.users_id if current_user else None
 
-        # 1. Save User Message
-        user_chat = Chats(
-            channels_id=sess.channel_id,
-            users_id=sender_id,
-            sessions_id=sess.sessions_id,
-            message=payload.message,
-            sender_type=RoleSender.user,
-        )
-        db.add(user_chat)
-        await db.flush()
-        await db.refresh(user_chat)
-
-        # 2. Call AI
+        # 1. เรียก AI ก่อน
         ai_messages = [{"role": "user", "content": payload.message}]
         ai_result = await call_ai(ai_messages, sess.channel_id, sess.sessions_id)
 
-        # 3. Save AI Message
-        ai_chat = Chats(
+        # 2. บันทึกทั้ง User Message และ AI Message ลงในแถวเดียว
+        new_chat = Chats(
             channels_id=sess.channel_id,
             users_id=sender_id,
             sessions_id=sess.sessions_id,
-            message=ai_result["answer"],
-            sender_type=RoleSender.AI,
+            user_message=payload.message,      # ใส่คำถาม
+            ai_message=ai_result["answer"],     # ใส่คำตอบ
         )
-        db.add(ai_chat)
+        db.add(new_chat)
         await db.flush()
-        await db.refresh(ai_chat)
+        await db.refresh(new_chat)
 
         return {
             "user_message": {
-                "chat_id": user_chat.chat_id,
-                "message": user_chat.message,
-                "sender_type": user_chat.sender_type,
-                "created_at": user_chat.created_at,
+                "chat_id": new_chat.chat_id,
+                "content": new_chat.user_message,
+                "created_at": new_chat.created_at,
             },
             "ai_message": {
-                "chat_id": ai_chat.chat_id,
-                "message": ai_chat.message,
-                "sender_type": ai_chat.sender_type,
-                "created_at": ai_chat.created_at,
+                "content": new_chat.ai_message,
             },
             "token_usage": ai_result["usage"]
         }
@@ -2664,8 +2662,8 @@ async def get_chat_history(session_id: str = Path(..., gt=0),
             channels_id=row.channels_id,
             users_id=row.users_id,
             sessions_id=row.sessions_id,
-            message=row.message,
-            sender_type=row.sender_type,
+            user_message=row.user_message,
+            ai_message=row.ai_message,
             created_at=row.created_at,
         ))
 
@@ -2796,7 +2794,6 @@ async def number_of_questions_asked_per_day(
             cast(Chats.created_at, Date).label("date"), 
             func.count().label("count")
         )
-        .where(Chats.sender_type == RoleSender.user)
     )
     
     # --- Date Range Filter ---
@@ -2843,7 +2840,6 @@ async def number_of_active_users_per_day(
             cast(Chats.created_at, Date).label("date"), 
             func.count(func.distinct(Chats.users_id)).label("active_users")
         )
-        .where(Chats.sender_type == RoleSender.user)
     )
     
     # --- Date Range Filter ---
@@ -2871,6 +2867,43 @@ async def number_of_active_users_per_day(
         for row in data
     ]
 
+@app.get('/channels/pending/count', tags=["Statistics"])
+async def channel_status_count(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
+
+    stmt = select(func.count()).select_from(Channel).where(Channel.status == RoleChannel.pending)
+    pending_count = await db.scalar(stmt)  # คืนค่าเป็น int
+
+    return {"Channel_pending_count": int(pending_count or 0)}
+
+@app.get('/channels/public/count', tags=["Statistics"])
+async def channel_status_count(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
+
+    stmt = select(func.count()).select_from(Channel).where(Channel.status == RoleChannel.public)
+    public_count = await db.scalar(stmt)  # คืนค่าเป็น int
+
+    return {"Channel_public_count": int(public_count or 0)}
+
+@app.get('/channels/private/count', tags=["Statistics"])
+async def channel_status_count(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
+
+    stmt = select(func.count()).select_from(Channel).where(Channel.status == RoleChannel.private)
+    private_count = await db.scalar(stmt)  # คืนค่าเป็น int
+    return {"Channel_private_count": int(private_count or 0)}
 
 # ============================================================
 #                  PUBLIC API ROUTES
@@ -2883,7 +2916,23 @@ async def create_api_key(
 ):
     # ใช้ logger ที่เราประกาศใหม่ข้างบน
     logger.info(f"Start create_api_key | user_id={current_user.users_id}")
-
+    if payload.channel_id:
+        # ตรวจสอบว่า channel เป็นของ user นี้จริงไหม
+        real_channel_id = decode_id(payload.channel_id)
+        stmt = select(Channel, ApiKey
+                      ).outerjoin(ApiKey, ApiKey.channel_id == Channel.channels_id
+                                  ).where(
+                                        Channel.channels_id == real_channel_id,
+                                        Channel.created_by == current_user.users_id)
+        result = await db.execute(stmt)
+        channel_with_key = result.first()
+        if not channel_with_key:
+            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์สร้าง API Key สำหรับ Channel นี้")
+        
+        _, existing_key = channel_with_key
+        if existing_key:
+            raise HTTPException(status_code=400, detail="มี API Key สำหรับ Channel นี้อยู่แล้ว")
+                   
     try:
         # 1. Random Key
         raw_key = "sk-" + secrets.token_urlsafe(32)
@@ -2893,6 +2942,7 @@ async def create_api_key(
 
         new_key = ApiKey(
             user_id=current_user.users_id,
+            channel_id=real_channel_id if payload.channel_id else None,
             key_hash=hashed,
             name=payload.name
         )
@@ -2907,6 +2957,7 @@ async def create_api_key(
         # 4. ส่งค่ากลับ (ตรวจสอบว่ามี created_at ไหม ถ้าไม่มีให้ใช้เวลาปัจจุบันแทนกัน error)
         return {
             "name": new_key.name,
+            "channel_id": payload.channel_id,
             "key_secret": raw_key,
             "created_at": new_key.created_at or datetime.now() 
         }
@@ -2916,7 +2967,7 @@ async def create_api_key(
         logger.error(f"Error creating API Key: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Server Error: {str(e)}"
+            detail=f"Internal Server Error"
         )
 
 @app.post("/auth/api-keys/revoke", status_code=204, tags=["Public API"])
@@ -2935,49 +2986,114 @@ async def revoke_api_key(
     if not api_key:
         raise HTTPException(status_code=404, detail="API Key not found")
     await db.delete(api_key)
-    return
+    
+    message = {
+        "message": "API Key revoked successfully"
+    }
+    
+    return message
+
+@app.get("/auth/api-keys/list", response_model=List[ApiKeyListResponse], tags=["Public API"])
+async def list_api_keys(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        stmt = select(ApiKey).where(ApiKey.user_id == current_user.users_id)
+        result = await db.execute(stmt)
+        keys = result.scalars().all()
+
+        response = []
+        for key in keys:
+            response.append(ApiKeyListResponse(
+                name=key.name,
+                channel_id=encode_id(key.channel_id) if key.channel_id else None,
+                key_hint=f"*********{key.key_hash[-4:]}",  # Key จริงที่ยังไม่ Hash (ไม่ส่งกลับใน list)
+                created_at=key.created_at or datetime.now()
+            ))
+
+        return response
+
+    except Exception as e:
+        # จะ log e ไว้ก็ได้ ถ้ามี logger
+        logger.error(f"Error listing API keys: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to fetch API keys"
+        )
+
+
 
 @app.post("/api/v1/chat/completions", tags=["Public API"])
 async def public_chat_api(
     payload: ExternalChatRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_user_by_api_key) # ใช้ API Key แทน Login
+    # รับค่าเป็น Tuple จาก Dependency ใหม่
+    auth_context: Tuple[User, ApiKey] = Depends(get_api_key_context) 
 ):
+    # Unpack ข้อมูลออกมา
+    current_user, current_api_key = auth_context
+
+    # แปลง Channel ID
     real_channel_id = decode_id(payload.channel_id)
     if not real_channel_id:
         raise HTTPException(status_code=404, detail="Invalid Channel ID")
 
-
+    # ดึงข้อมูล Channel จริงจาก DB
     stmt = select(Channel).where(Channel.channels_id == real_channel_id)
     res = await db.execute(stmt)
     channel = res.scalar_one_or_none()
     
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+
+    # =========================================================
+    # 🎯 NEW LOGIC: ตรวจสอบสิทธิ์ (Authorization & Scope)
+    # =========================================================
+    
+    # กรณี 1: Scoped Key (Key นี้ถูกสร้างมาเพื่อห้องนี้โดยเฉพาะ)
+    if current_api_key.channel_id is not None:
+        # ถ้า Key ระบุห้อง แต่ห้องที่ขอไม่ตรงกัน -> ผิด!
+        if current_api_key.channel_id != real_channel_id:
+            logger.warning(f"Key Abuse: Key for channel {current_api_key.channel_id} tried to access {real_channel_id}")
+            raise HTTPException(status_code=403, detail="This API Key is not valid for the requested channel")
         
-    if channel.created_by != current_user.users_id and current_user.role != RoleUser.admin:
-        if channel.status != RoleChannel.public:
-             raise HTTPException(status_code=403, detail="Access denied to this channel")
+        # ถ้าตรงกัน = ผ่านเลย (เพราะคนสร้าง Key คือเจ้าของห้องอยู่แล้ว)
+
+    # กรณี 2: Master Key (Key ไม่ระบุห้อง = เข้าได้ทุกห้องที่เป็นของตัวเอง)
+    else:
+        # ต้องเช็คความเป็นเจ้าของห้อง
+        is_owner = (channel.created_by == current_user.users_id)
+        is_admin = (current_user.role == RoleUser.admin)
+        is_public_channel = (channel.status == RoleChannel.public)
+
+        if not (is_owner or is_admin or is_public_channel):
+             raise HTTPException(status_code=403, detail="Access denied: You do not own this channel")
+
+    # =========================================================
+    # ส่วนการทำงาน RAG เดิม
+    # =========================================================
 
     last_user_msg = payload.messages[-1]["content"]
     
+    # สร้าง Session ID สำหรับ Redis
     if payload.conversation_id:
-        redis_session_key = f"api:{current_user.users_id}:{payload.conversation_id}"
+        # แยก Session ตาม Key ID ด้วย เพื่อไม่ให้ชนกันถ้าระบบซับซ้อนขึ้น
+        redis_session_key = f"api:{current_user.users_id}:{real_channel_id}:{payload.conversation_id}"
     else:
         redis_session_key = f"api_temp:{uuid.uuid4()}"
 
     try:
         result = await asyncio.to_thread(
-            rag_engine.query, 
+            rag_engine.aquery, 
             question=last_user_msg, 
             channel_id=real_channel_id, 
             sessions_id=redis_session_key 
         )
     except Exception as e:
-        logger.error(f"RAG Error: {e}")
+        logger.error(f"RAG Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal AI Error")
 
-    # ตอบกลับรูปแบบ OpenAI Format (มาตรฐานนิยม)
     return {
         "id": payload.conversation_id or f"chatcmpl-{uuid.uuid4()}",
         "object": "chat.completion",

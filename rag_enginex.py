@@ -375,6 +375,7 @@ class RAGService:
                 "answer": answer_text,
                 "usage": token_usage,
                 "sources": list(file_names)
+                
             }
             
     def debug_list_docs_by_channel(self, channel_id: int):
