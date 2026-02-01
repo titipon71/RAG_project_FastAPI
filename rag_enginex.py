@@ -88,7 +88,7 @@ class AppConfig:
     # Parameters
     CONTEXT_WINDOW: int = 4096
     NUM_OUTPUT: int = 512
-    TOP_K: int = 3
+    TOP_K: int = 5
     CHUNK_SIZE: int = 512 # สำหรับ Splitting
     
     # Prompts

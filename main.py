@@ -38,7 +38,7 @@ from sqlalchemy.dialects.mysql import INTEGER as MyInt, ENUM as MyEnum
 from fastapi.middleware.cors import CORSMiddleware
 import os, secrets
 from llama_index.core import SimpleDirectoryReader
-from fastapi.responses import HTMLResponse, PlainTextResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 import sys
@@ -2616,17 +2616,21 @@ async def Talking_with_Ollama_from_document(
         return {
             "user_message": {
                 "chat_id": new_chat.chat_id,
-                "content": new_chat.user_message,
+                "   ": new_chat.user_message,
                 "created_at": new_chat.created_at,
             },
-            "ai_message": {
-                "content": new_chat.ai_message,
+            "ai_message": { 
+                "message": new_chat.ai_message,
             },
             "token_usage": ai_result["usage"]
         }
 
     except HTTPException as he:
-        raise he
+        logger.error(f"HTTPException: {he.detail}", exc_info=True)
+        return JSONResponse(
+            status_code=he.status_code,
+            content={"message": "แจ้ง backend ด้วยจ้า", "detail": he.detail}
+        )
     except Exception as e:
         logger.error(f"Ollama Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
