@@ -1,0 +1,9 @@
+เพิ่มอุ่มเครื่อง VDB แต่ละเจ้า
+refactor ocr report
+docling OCR และ DocRCR 
+
+⬇️ สร้างไฟล์ text Hello World 5 ล้านบรรทัด => เอาไปหา Qury Time ของ Vector Database ในแต่ละเจ้า ⬇️
+ใช้ Numpy สุ่มตัวเลข (Vector) ให้มีจำนวนมิติเท่ากับ Embedding Model จากนั้นใส่เอาใส่เข้า Vector Database ตรงๆ เลย ส่วนในการวัด Query Time ก็สุ่มตัวเลขมา จากนั้น Query โดยใช้ตัวเลขที่สุ่มมาเพื่อค้นหาไปค้น
+
+User Login => Save  User info To My Database => จัดการ User ใน Database เรา 
+* User ต้อง Login เพื่อให้เราเก็บข้อมูลก่อนจึงสามารถจัดการ User ได้

@@ -20,6 +20,7 @@ from fastapi import Body, FastAPI, APIRouter, Depends, File as FastAPIFile, Form
 from fastapi.concurrency import asynccontextmanager
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm , APIKeyHeader
 # import httpx
+import httpx
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel , EmailStr, WithJsonSchema, field_validator, Field
@@ -199,6 +200,11 @@ class Settings(BaseSettings):
     TRASH_DIR: pathlib.Path = pathlib.Path("./trash")
     HASH_SALT: str = os.getenv("HASH_SALT")
     MIN_LENGTH: int = int(os.getenv("MIN_LENGTH", 8))
+    SSO_CLIENT_ID: str = os.getenv("SSO_CLIENT_ID")
+    SSO_CLIENT_SECRET: str = os.getenv("SSO_CLIENT_SECRET")
+    SSO_REDIRECT_URI: str = os.getenv("SSO_REDIRECT_URI")
+    SSO_TOKEN_URL: str = os.getenv("SSO_TOKEN_URL")
+    SSO_USERINFO_URL: str = os.getenv("SSO_USERINFO_URL")
     class Config:
         env_file = ".env"
 
@@ -725,6 +731,9 @@ class ORMBase(BaseModel):
         from_attributes = True
         populate_by_name = True
 
+class SSOCodeRequest(BaseModel):
+    code: str
+    
 # --- User Schemas ---
 class UserCreate(BaseModel):
     username: str
@@ -996,15 +1005,17 @@ class ApiKeyRevoke(BaseModel):
 
 # Schema สำหรับส่ง Key กลับ (แสดง key_secret แค่ครั้งเดียว)
 class ApiKeyResponse(BaseModel):
+    key_id: int
     name: str
     channel_id: str | None = None
     key_secret: str # Key จริงที่ยังไม่ Hash
     created_at: datetime
 
 class ApiKeyListResponse(BaseModel):
+    key_id: int
     name: str
     channel_id: Optional[str]
-    key_hint: str      # ⬅️ ไม่เรียก secret
+    key_hint: str
     created_at: datetime
 
 class ExternalChatRequest(BaseModel):
@@ -1057,21 +1068,14 @@ app.add_middleware(
                    "https://www.lukeenortaed.site",
                    "https://*.ngrok-free.app",
                    "https://project-rag-frontend.vercel.app",
-                   "https://docsmind-rag.lukeenortaed.site"],
+                   "https://docsmind-rag.lukeenortaed.site",
+                   "https://titipon71.github.io",
+                   "https://project-rag-six.vercel.app"],
     allow_origin_regex=r"https://.*\.ngrok-free\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# router = fastapi.APIRouter()
-# fsd.install(router)
-# app.include_router(router)
-
-
-#     # สร้างตารางอัตโนมัติ (เหมาะกับ dev/POC) — โปรดใช้ Alembic ในงานจริง
-#     async with engine.begin() as conn:
-#         await conn.run_sync(Base.metadata.create_all)
 
 
 # ============================================================
@@ -1204,6 +1208,127 @@ async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = 
 # ============================================================
 #                  USER ROUTES (CRUD + ROLE)
 # ============================================================
+# --- KMUTNB SSO ---
+# Token Request
+@app.post("/auth/sso/kmutnb", tags=["Authentication"])
+async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)):
+    try:
+        # =========================
+        # 1) ขอ Token จาก SSO
+        # =========================
+        try:
+            async with httpx.AsyncClient() as client:
+                token_response = await client.post(
+                    settings.SSO_TOKEN_URL,
+                    auth=(settings.SSO_CLIENT_ID, settings.SSO_CLIENT_SECRET),
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": payload.code,
+                        "redirect_uri": settings.SSO_REDIRECT_URI,
+                    }
+                )
+        except httpx.RequestError as e:
+            logger.error(f"SSO Token Request Error: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail="ไม่สามารถเชื่อมต่อ SSO Server ได้")
+
+        if token_response.status_code != 200:
+            logger.error(f"SSO Token Failed: {token_response.text}")
+            raise HTTPException(status_code=400, detail="SSO token request failed")
+
+        try:
+            token_json = token_response.json()
+        except Exception as e:
+            logger.error(f"Invalid Token JSON: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail="SSO ตอบกลับข้อมูล token ผิดรูปแบบ")
+
+        access_token = token_json.get("access_token")
+        if not access_token:
+            raise HTTPException(status_code=400, detail=f"ไม่ได้รับ access_token จาก SSO: {token_json}")
+
+        # =========================
+        # 2) ดึงข้อมูลผู้ใช้จาก SSO
+        # =========================
+        try:
+            async with httpx.AsyncClient() as client:
+                user_info_res = await client.get(
+                    settings.SSO_USERINFO_URL,
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+        except httpx.RequestError as e:
+            logger.error(f"SSO UserInfo Request Error: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail="ไม่สามารถดึงข้อมูลผู้ใช้จาก SSO ได้")
+
+        if user_info_res.status_code != 200:
+            logger.error(f"SSO UserInfo Failed: {user_info_res.text}")
+            raise HTTPException(status_code=400, detail=f"SSO userinfo request failed: {user_info_res.text}")
+
+        try:
+            sso_data = user_info_res.json()
+        except Exception as e:
+            logger.error(f"Invalid UserInfo JSON: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail="SSO ตอบกลับข้อมูลผิดรูปแบบ")
+
+        username = sso_data.get("profile", {}).get("username")
+        if not username:
+            raise HTTPException(status_code=400, detail=f"ไม่พบ username ในข้อมูล SSO: {sso_data}")
+
+        # =========================
+        # 3) ค้นหาหรือสร้าง User
+        # =========================
+        try:
+            stmt = select(User).where(User.username == username)
+            result = await db.execute(stmt)
+            user = result.scalar_one_or_none()
+
+            if not user:
+                new_user = User(
+                    username=username,
+                    name=sso_data.get("profile", {}).get("name_en"),
+                    email=sso_data.get("profile", {}).get("email"),
+                    hashed_password=username,  # แนะนำให้เปลี่ยนใน production
+                    role=RoleUser.user
+                )
+                db.add(new_user)
+                await db.flush()
+                await db.refresh(new_user)
+                user = new_user
+            else:
+                user.name = sso_data.get("profile", {}).get("name_en")
+                user.email = sso_data.get("profile", {}).get("email")
+                await db.flush()
+
+        except IntegrityError:
+            logger.warning(f"Duplicate user from SSO | username={username}")
+            raise HTTPException(status_code=409, detail="ข้อมูลผู้ใช้ซ้ำกับที่มีในระบบ")
+
+        except SQLAlchemyError as e:
+            logger.error(f"SSO DB Error: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="เกิดข้อผิดพลาดในฐานข้อมูล")
+
+        # =========================
+        # 4) Return Response
+        # =========================
+        return {
+            "message": "SSO login successful",
+            "user_id": user.users_id,
+            "username": user.username,
+            "access_token": create_access_token(
+                data={"sub": str(user.users_id)}
+            )
+        }
+
+    except HTTPException:
+        # ปล่อย HTTPException เดิมออกไป
+        raise
+
+    except Exception as e:
+        logger.error(f"Unexpected SSO Error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal Server Error"
+        )
+
+
 # --- CRUD User ---
 # add user
 @app.post("/users", response_model=UserOut, status_code=201, tags=["Users"])
@@ -2918,61 +3043,79 @@ async def create_api_key(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # ใช้ logger ที่เราประกาศใหม่ข้างบน
     logger.info(f"Start create_api_key | user_id={current_user.users_id}")
-    if payload.channel_id:
-        # ตรวจสอบว่า channel เป็นของ user นี้จริงไหม
-        real_channel_id = decode_id(payload.channel_id)
-        stmt = select(Channel, ApiKey
-                      ).outerjoin(ApiKey, ApiKey.channel_id == Channel.channels_id
-                                  ).where(
-                                        Channel.channels_id == real_channel_id,
-                                        Channel.created_by == current_user.users_id)
-        result = await db.execute(stmt)
-        channel_with_key = result.first()
-        if not channel_with_key:
-            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์สร้าง API Key สำหรับ Channel นี้")
-        
-        _, existing_key = channel_with_key
-        if existing_key:
-            raise HTTPException(status_code=400, detail="มี API Key สำหรับ Channel นี้อยู่แล้ว")
-                   
-    try:
-        # 1. Random Key
-        raw_key = "sk-" + secrets.token_urlsafe(32)
 
-        # 2. Hash key
+    try:
+        real_channel_id = None
+
+        # ===== ตรวจสอบ Channel =====
+        if payload.channel_id:
+            real_channel_id = decode_id(payload.channel_id)
+
+            stmt = (
+                select(Channel, ApiKey)
+                .outerjoin(ApiKey, ApiKey.channel_id == Channel.channels_id)
+                .where(
+                    Channel.channels_id == real_channel_id,
+                    Channel.created_by == current_user.users_id
+                )
+            )
+
+            result = await db.execute(stmt)
+            channel_with_key = result.first()
+
+            if not channel_with_key:
+                raise HTTPException(
+                    status_code=403,
+                    detail="ไม่มีสิทธิ์สร้าง API Key สำหรับ Channel นี้"
+                )
+
+            _, existing_key = channel_with_key
+
+            if existing_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="มี API Key สำหรับ Channel นี้อยู่แล้ว"
+                )
+
+        # ===== สร้าง API Key =====
+        raw_key = "sk-" + secrets.token_urlsafe(32)
         hashed = hash_key(raw_key)
 
         new_key = ApiKey(
             user_id=current_user.users_id,
-            channel_id=real_channel_id if payload.channel_id else None,
+            channel_id=real_channel_id,
             key_hash=hashed,
             name=payload.name
         )
 
         db.add(new_key)
-        await db.flush()        
-        # 3. Refresh เพื่อเอา created_at และ key_id จาก DB
+        await db.flush()
         await db.refresh(new_key)
 
         logger.info(f"API key created | id={new_key.key_id}")
 
-        # 4. ส่งค่ากลับ (ตรวจสอบว่ามี created_at ไหม ถ้าไม่มีให้ใช้เวลาปัจจุบันแทนกัน error)
         return {
             "name": new_key.name,
             "channel_id": payload.channel_id,
             "key_secret": raw_key,
-            "created_at": new_key.created_at or datetime.now() 
+            "created_at": new_key.created_at or datetime.now()
         }
 
+    except HTTPException:
+        # ปล่อย HTTPException เดิมออกไป (ไม่ต้อง log เป็น 500)
+        raise
+
     except Exception as e:
-        # Log Error แบบเต็มๆ ออกมาดู
-        logger.error(f"Error creating API Key: {e}", exc_info=True)
+        logger.error(
+            f"Error creating API Key | user_id={current_user.users_id} | error={str(e)}",
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500,
-            detail=f"Internal Server Error"
+            detail="Internal Server Error"
         )
+
 
 @app.post("/auth/api-keys/revoke", status_code=204, tags=["Public API"])
 async def revoke_api_key(
