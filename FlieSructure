@@ -1,0 +1,294 @@
+[
+  {
+    "name": "core",
+    "type": "folder",
+    "children": [
+      {
+        "name": "api_key_security.py",
+        "type": "file"
+      },
+      {
+        "name": "config.py",
+        "type": "file"
+      },
+      {
+        "name": "enums.py",
+        "type": "file"
+      },
+      {
+        "name": "hashids.py",
+        "type": "file"
+      },
+      {
+        "name": "logging.py",
+        "type": "file"
+      },
+      {
+        "name": "security.py",
+        "type": "file"
+      }
+    ]
+  },
+  {
+    "name": "db",
+    "type": "folder",
+    "children": [
+      {
+        "name": "base.py",
+        "type": "file"
+      },
+      {
+        "name": "models",
+        "type": "folder",
+        "children": [
+          {
+            "name": "api_key.py",
+            "type": "file"
+          },
+          {
+            "name": "channel.py",
+            "type": "file"
+          },
+          {
+            "name": "chat.py",
+            "type": "file"
+          },
+          {
+            "name": "event.py",
+            "type": "file"
+          },
+          {
+            "name": "file.py",
+            "type": "file"
+          },
+          {
+            "name": "session.py",
+            "type": "file"
+          },
+          {
+            "name": "user.py",
+            "type": "file"
+          }
+        ]
+      },
+      {
+        "name": "session.py",
+        "type": "file"
+      }
+    ]
+  },
+  {
+    "name": "file_storage",
+    "type": "folder",
+    "children": [
+      {
+        "name": "trash",
+        "type": "folder",
+        "children": []
+      },
+      {
+        "name": "uploads",
+        "type": "folder",
+        "children": []
+      }
+    ]
+  },
+  {
+    "name": "FlieSructure",
+    "type": "file"
+  },
+  {
+    "name": "Hashids_demo.py",
+    "type": "file"
+  },
+  {
+    "name": "main.py",
+    "type": "file"
+  },
+  {
+    "name": "rag.sql",
+    "type": "file"
+  },
+  {
+    "name": "rag_enginex.py",
+    "type": "file"
+  },
+  {
+    "name": "rag_enginex_qdrant.py",
+    "type": "file"
+  },
+  {
+    "name": "rag_engine_for_terminal.py",
+    "type": "file"
+  },
+  {
+    "name": "rag_engine_old_version.py",
+    "type": "file"
+  },
+  {
+    "name": "README.md",
+    "type": "file"
+  },
+  {
+    "name": "requirements.txt",
+    "type": "file"
+  },
+  {
+    "name": "routers",
+    "type": "folder",
+    "children": [
+      {
+        "name": "api_key.py",
+        "type": "file"
+      },
+      {
+        "name": "auth.py",
+        "type": "file"
+      },
+      {
+        "name": "channels.py",
+        "type": "file"
+      },
+      {
+        "name": "events.py",
+        "type": "file"
+      },
+      {
+        "name": "files.py",
+        "type": "file"
+      },
+      {
+        "name": "session.py",
+        "type": "file"
+      },
+      {
+        "name": "statistics.py",
+        "type": "file"
+      },
+      {
+        "name": "users.py",
+        "type": "file"
+      },
+      {
+        "name": "utility.py",
+        "type": "file"
+      }
+    ]
+  },
+  {
+    "name": "run.md",
+    "type": "file"
+  },
+  {
+    "name": "schemas",
+    "type": "folder",
+    "children": [
+      {
+        "name": "api_key.py",
+        "type": "file"
+      },
+      {
+        "name": "auth.py",
+        "type": "file"
+      },
+      {
+        "name": "base.py",
+        "type": "file"
+      },
+      {
+        "name": "channel.py",
+        "type": "file"
+      },
+      {
+        "name": "chat.py",
+        "type": "file"
+      },
+      {
+        "name": "event.py",
+        "type": "file"
+      },
+      {
+        "name": "file.py",
+        "type": "file"
+      },
+      {
+        "name": "moderation.py",
+        "type": "file"
+      },
+      {
+        "name": "session.py",
+        "type": "file"
+      },
+      {
+        "name": "user.py",
+        "type": "file"
+      }
+    ]
+  },
+  {
+    "name": "services",
+    "type": "folder",
+    "children": [
+      {
+        "name": "auth_service.py",
+        "type": "file"
+      },
+      {
+        "name": "channel_service.py",
+        "type": "file"
+      },
+      {
+        "name": "file_service.py",
+        "type": "file"
+      },
+      {
+        "name": "rag_service.py",
+        "type": "file"
+      },
+      {
+        "name": "session_service.py",
+        "type": "file"
+      },
+      {
+        "name": "user_service.py",
+        "type": "file"
+      }
+    ]
+  },
+  {
+    "name": "templates",
+    "type": "folder",
+    "children": [
+      {
+        "name": "hashids_demo.html",
+        "type": "file"
+      },
+      {
+        "name": "index.html",
+        "type": "file"
+      }
+    ]
+  },
+  {
+    "name": "todolist",
+    "type": "file"
+  },
+  {
+    "name": "__pycache__",
+    "type": "folder",
+    "children": [
+      {
+        "name": "main.cpython-311.pyc",
+        "type": "file"
+      },
+      {
+        "name": "rag_engine.cpython-311.pyc",
+        "type": "file"
+      },
+      {
+        "name": "rag_enginex.cpython-311.pyc",
+        "type": "file"
+      }
+    ]
+  }
+]
