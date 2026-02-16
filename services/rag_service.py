@@ -16,3 +16,4 @@ async def call_ai(messages: List[dict], channel_id: int, session_id: int) -> dic
         last_user_msg = "สรุปข้อมูลจากฐานเอกสารให้หน่อย"
 
     result = await rag_engine.aquery(last_user_msg, channel_id, session_id)
+    return result
