@@ -10,6 +10,7 @@ from scalar_fastapi import get_scalar_api_reference
 from core.config import settings
 from core.tag import tags_metadata
 from core.cors import ALLOWED_ORIGINS, ALLOW_ORIGIN_REGEX
+from core.logging import apply_custom_logging
 
 # Routers
 from routers import auth, users, channels, files, session, events, statistics, api_key, utility
@@ -45,6 +46,11 @@ app.include_router(events.router)
 app.include_router(statistics.router)
 app.include_router(api_key.router)
 app.include_router(utility.router)
+
+# ---------- Startup Event ----------
+@app.on_event("startup")
+async def startup_event():
+    apply_custom_logging()
 
 # ---------- Root / Docs ----------
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)

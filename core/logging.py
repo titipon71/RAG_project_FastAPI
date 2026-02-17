@@ -69,10 +69,12 @@ class CustomColorFormatter(logging.Formatter):
 custom_formatter = CustomColorFormatter()
 logger = logging.getLogger("uvicorn.error")
 
-access_logger = logging.getLogger("uvicorn.access")
-if access_logger.handlers:
-    access_logger.handlers[0].setFormatter(custom_formatter)
 
-uvicorn_logger = logging.getLogger("uvicorn")
-if uvicorn_logger.handlers:
-    uvicorn_logger.handlers[0].setFormatter(custom_formatter)
+def apply_custom_logging():
+    """Apply custom formatter to all uvicorn loggers.
+    Must be called after uvicorn has initialized its handlers (e.g. in app startup event).
+    """
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        log = logging.getLogger(name)
+        for handler in log.handlers:
+            handler.setFormatter(custom_formatter)
