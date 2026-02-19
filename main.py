@@ -18,13 +18,14 @@ from routers import auth, users, channels, files, session, events, statistics, a
 # ============================================================
 #                  APP INITIALIZATION
 # ============================================================
-app = FastAPI(title="FastAPI + MariaDB + JWT", openapi_tags=tags_metadata)
+app = FastAPI(title="KMUTNBLM (FastAPI + MariaDB + JWT)", openapi_tags=tags_metadata)
 templates = Jinja2Templates(directory="templates")
 
 # ---------- Static Files ----------
 UPLOAD_ROOT = settings.upload_root
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 app.mount("/static/uploads", StaticFiles(directory=UPLOAD_ROOT), name="uploads")
+app.mount("/static/templates", StaticFiles(directory="templates"), name="templates_static")
 
 # ---------- Middleware ----------
 app.add_middleware(

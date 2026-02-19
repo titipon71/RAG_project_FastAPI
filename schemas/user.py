@@ -6,6 +6,10 @@ from pydantic import BaseModel, EmailStr
 from core.enums import RoleUser
 from schemas.base import ORMBase
 
+# --- SSO User Schemas ---
+class SSOUserInfo(BaseModel):
+    sso_access_token: str
+
 
 # --- User Schemas ---
 class UserCreate(BaseModel):

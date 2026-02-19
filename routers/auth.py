@@ -109,6 +109,7 @@ async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)
                     username=username,
                     name=sso_data.get("profile", {}).get("name_en"),
                     email=sso_data.get("profile", {}).get("email"),
+                    account_type=sso_data.get("profile", {}).get("account_type"),
                     hashed_password=username,  # แนะนำให้เปลี่ยนใน production
                     role=RoleUser.user
                 )
@@ -119,6 +120,7 @@ async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)
             else:
                 user.name = sso_data.get("profile", {}).get("name_en")
                 user.email = sso_data.get("profile", {}).get("email")
+                user.account_type = sso_data.get("profile", {}).get("account_type")
                 await db.flush()
 
         except IntegrityError:
@@ -136,13 +138,15 @@ async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)
             "message": "SSO login successful",
             "user_id": user.users_id,
             "username": user.username,
-            "access_token": create_access_token(
+            "account_type": user.account_type,
+            "local_access_token": create_access_token(
                 data={"sub": str(user.users_id)}
-            )
+            ),
+            "sso_access_token": access_token
         }
 
     except HTTPException:
-        # ปล่อย HTTPException เดิมออกไป
+        logger.warning("Caught HTTPException in SSO login")
         raise
 
     except Exception as e:

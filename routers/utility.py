@@ -143,3 +143,11 @@ def debug_endpoint(
 #             "created_at": u.created_at,
 #         })
 #     return user_list
+
+@router.get("/callback", tags=["System & Utility"], response_class=HTMLResponse)
+async def get_callback(code: str, state: str):
+    return templates.TemplateResponse("callback.html", {
+        "request": Request(scope={"type": "http", "method": "GET", "path": "/callback"}),
+        "code": code,
+        "state": state
+    })

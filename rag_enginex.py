@@ -267,7 +267,7 @@ class RAGService:
         if engine_key in self.chat_engines:
             return self.chat_engines[engine_key]
             
-        # 3. ถ้ายังไม่มี ให้สร้างใหม่ (Logic เดิมย้ายมาไว้ที่นี่)
+        # 3. ถ้ายังไม่มี ให้สร้างใหม่
         logger.info(f"Creating new ChatEngine for key: {engine_key}")
         
         filters = MetadataFilters(

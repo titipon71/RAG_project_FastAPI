@@ -2,6 +2,7 @@ import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Body
+import httpx
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,12 +11,28 @@ from core.enums import RoleUser
 from core.security import get_current_user, verify_password
 from db.session import get_db
 from db.models.user import User
-from schemas.user import UserCreate, UserOut, UserUpdate, UserPasswordUpdate
+from schemas.user import UserCreate, UserOut, UserUpdate, UserPasswordUpdate, SSOUserInfo
 from services.user_service import get_user_by_id
 
 logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter()
+
+# ============================================================
+#                 SSO USER ROUTES 
+# ============================================================
+@router.post("/user/sso/info", tags=["Users"])
+async def get_sso_user_info(payload: SSOUserInfo):
+    async with httpx.AsyncClient() as client:
+        try:
+            headers = {"Authorization": f"Bearer {payload.sso_access_token}"}
+            response = await client.get("https://sso.kmutnb.ac.th/resources/userinfo", headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            return data
+        except httpx.HTTPError as e:
+            logger.error(f"Failed to fetch SSO user info: {e}")
+            raise HTTPException(status_code=502, detail="ไม่สามารถเชื่อมต่อกับ SSO ได้")
 
 
 # ============================================================
