@@ -1,11 +1,10 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, text
+from sqlalchemy import ForeignKey, String, text
 from sqlalchemy.dialects.mysql import INTEGER as MyInt, ENUM as MyEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
-
 from db.base import Base
 from core.enums import RoleUser
 
@@ -21,7 +20,7 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column("hashed_password", String(255), nullable=False)
     email: Mapped[Optional[str]] = mapped_column("email", String(320), unique=True, nullable=True)
     account_type: Mapped[str] = mapped_column("account_type", String(50), nullable=True)
-    file_size: Mapped[int] = mapped_column("file_size", MyInt(unsigned=True), nullable=False)
+    file_size_id: Mapped[int] = mapped_column("file_size", MyInt(unsigned=True),ForeignKey("file_size.file_size_id"), nullable=False, server_default=text("1"))
     role: Mapped[RoleUser] = mapped_column("role", MyEnum(RoleUser), nullable=False, server_default=text("'user'"))
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 

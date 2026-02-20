@@ -645,7 +645,7 @@ async def list_pending_channels(
             description=ch.description,
             status=ch.status,
             created_by_id=ch.created_by,
-            created_by_name=ch.creator.username if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
+            created_by_name=ch.creator.name if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
             created_at=ch.created_at,
             file_count=len(ch.files),
             files=file_list,
@@ -706,7 +706,7 @@ async def list_public_channels(
             description=ch.description,
             status=ch.status,
             created_by_id=ch.created_by,
-            created_by_name=ch.creator.username if ch.creator else "Unknown", # ดึงชื่อจาก Relation
+            created_by_name=ch.creator.name if ch.creator else "Unknown", # ดึงชื่อจาก Relation
             created_at=ch.created_at,
             file_count=len(ch.files),
             files=file_list,
@@ -763,7 +763,7 @@ async def list_my_channels(
             description=ch.description,
             status=ch.status,
             created_by_id=ch.created_by,
-            created_by_name=ch.creator.username if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
+            created_by_name=ch.creator.name if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
             created_at=ch.created_at,
             file_count=len(ch.files),
             files=file_list,
@@ -820,7 +820,7 @@ async def list_all_channels(
             description=ch.description,
             status=ch.status,
             created_by_id=ch.created_by,
-            created_by_name=ch.creator.username if ch.creator else "Unknown",
+            created_by_name=ch.creator.name if ch.creator else "Unknown",
             created_at=ch.created_at,
             file_count=len(ch.files),
             files=file_list,

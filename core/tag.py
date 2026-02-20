@@ -39,4 +39,8 @@ tags_metadata = [
         "name": "System & Utility",
         "description": "Health check, Debug และ Demo tools",
     },
+    {
+        "name": "File Size",
+        "description": "CRUD ขนาดไฟล์ที่สามารถอัปโหลดได้ของแต่ละ user",
+    }
 ]

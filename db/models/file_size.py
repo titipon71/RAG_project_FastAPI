@@ -1,4 +1,6 @@
 from db.base import Base
+from sqlalchemy.dialects.mysql import INTEGER as MyInt
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 class FileSize(Base):
     __tablename__ = "file_size"

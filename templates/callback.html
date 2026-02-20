@@ -297,6 +297,138 @@
     }
 
     .toast.show { transform: translateX(-50%) translateY(0); }
+
+    /* Response display */
+    .response-area {
+      margin-top: 1rem;
+      display: none;
+    }
+    .response-area.visible { display: block; }
+    .response-box {
+      background: var(--soft);
+      border: 2px solid var(--border);
+      border-radius: 16px;
+      padding: 1rem 1.2rem;
+      font-family: 'Nunito', sans-serif;
+      font-size: 0.82rem;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 240px;
+      overflow-y: auto;
+      line-height: 1.6;
+      transition: border-color 0.25s;
+    }
+    .response-box:hover { border-color: var(--accent); }
+    .response-box.error { border-color: #f87171; }
+    .response-box.success { border-color: #34d399; }
+    .response-box::-webkit-scrollbar { width: 6px; }
+    .response-box::-webkit-scrollbar-track { background: transparent; }
+    .response-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+
+    /* Prism.js custom theme */
+    code[class*="language-"],
+    pre[class*="language-"] {
+      background: none;
+      color: var(--text);
+      text-shadow: none;
+      font-family: 'Nunito', sans-serif;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin: 0;
+      padding: 0;
+    }
+    .token.property { color: #c084fc; font-weight: 600; }
+    .token.string { color: #34d399; }
+    .token.number { color: #f472b6; }
+    .token.boolean { color: #60a5fa; font-weight: 600; }
+    .token.null { color: #9a6aaa; font-style: italic; }
+    .token.operator { color: var(--muted); }
+    .token.punctuation { color: var(--muted); }
+    [data-theme="dark"] .token.property { color: #d8b4fe; }
+    [data-theme="dark"] .token.string { color: #6ee7b7; }
+    [data-theme="dark"] .token.number { color: #f9a8d4; }
+    [data-theme="dark"] .token.boolean { color: #93c5fd; }
+
+    /* Response header bar */
+    .response-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.4rem;
+    }
+    .response-status {
+      font-family: 'Nunito', sans-serif;
+      font-size: 0.72rem;
+      padding: 3px 10px;
+      border-radius: 100px;
+      font-weight: 600;
+    }
+    .response-status.success { background: rgba(52,211,153,0.15); color: #34d399; }
+    .response-status.error { background: rgba(248,113,113,0.15); color: #f87171; }
+    .response-copy {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--muted);
+      font-family: 'Nunito', sans-serif;
+      font-size: 0.72rem;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 10px;
+      border-radius: 8px;
+      transition: color 0.2s, background 0.2s;
+    }
+    .response-copy:hover { color: var(--accent); background: var(--accent-dim); }
+
+    /* Loading spinner */
+    .loading-dot {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      margin: 0 2px;
+      animation: bounce 1.2s ease-in-out infinite;
+    }
+    .loading-dot:nth-child(2) { animation-delay: 0.15s; }
+    .loading-dot:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes bounce {
+      0%,80%,100% { transform: scale(0); opacity: 0.4; }
+      40% { transform: scale(1); opacity: 1; }
+    }
+
+    /* Collapsible dropdown */
+    .dropdown-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+      padding: 0.4rem 0;
+    }
+    .dropdown-toggle .chevron {
+      display: inline-flex;
+      transition: transform 0.3s ease;
+      color: var(--muted);
+    }
+    .dropdown-toggle .chevron.open {
+      transform: rotate(90deg);
+    }
+    .dropdown-content {
+      overflow: hidden;
+      max-height: 0;
+      opacity: 0;
+      transition: max-height 0.35s ease, opacity 0.3s ease, margin 0.3s ease;
+      margin-top: 0;
+    }
+    .dropdown-content.open {
+      max-height: 200px;
+      opacity: 1;
+      margin-top: 0.4rem;
+    }
   </style>
 </head>
 <body>
@@ -316,7 +448,6 @@
       Authorization Successful
     </div>
 
-    <span class="emoji-icon a2">🔑</span>
     <h1 class="a3">Callback Received!</h1>
     <p class="subtitle a4">Your OAuth tokens are ready to use~</p>
 
@@ -326,6 +457,9 @@
         <div class="field-label">🔐 Authorization Code</div>
         <div class="field-box">
           <span class="field-value" id="code-val">4/0AfJohXmTzKqP8xFjVwR2...</span>
+          <button class="copy-btn" onclick="runCode()" title="Run">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-play-icon lucide-play"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>
+          </button>
           <button class="copy-btn" onclick="copyField('code-val', this)" title="Copy code">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
@@ -334,15 +468,38 @@
         </div>
       </div>
 
+      <!-- Response display area -->
+      <div class="response-area" id="response-area">
+        <div class="response-header">
+          <div class="field-label" style="margin-bottom:0">📨 Response</div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="response-status" id="response-status"></span>
+            <button class="response-copy" onclick="copyResponse()" title="Copy response">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy
+            </button>
+          </div>
+        </div>
+        <div class="response-box" id="response-box"></div>
+      </div>
+
+      <!-- State as collapsible dropdown -->
       <div class="a6">
-        <div class="field-label">🛡️ State</div>
-        <div class="field-box">
-          <span class="field-value" id="state-val">xK9mP2vLqR7nT4wJ</span>
-          <button class="copy-btn" onclick="copyField('state-val', this)" title="Copy state">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-            </svg>
-          </button>
+        <div class="dropdown-toggle" onclick="toggleDropdown()">
+          <span class="chevron" id="state-chevron">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </span>
+          <div class="field-label" style="margin-bottom:0">🛡️ State</div>
+        </div>
+        <div class="dropdown-content" id="state-dropdown">
+          <div class="field-box">
+            <span class="field-value" id="state-val">xK9mP2vLqR7nT4wJ</span>
+            <button class="copy-btn" onclick="copyField('state-val', this)" title="Copy state">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -357,6 +514,9 @@
   </div>
 
   <div class="toast" id="toast">🎀 Copied to clipboard!</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
 
   <script>
     // --- Theme management ---
@@ -418,6 +578,75 @@
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
     }
+
+    function toggleDropdown() {
+      const content = document.getElementById('state-dropdown');
+      const chevron = document.getElementById('state-chevron');
+      content.classList.toggle('open');
+      chevron.classList.toggle('open');
+    }
+
+    // --- JSON syntax highlighting (Prism.js) ---
+    let rawResponseText = '';
+
+    function showResponse(content, type, statusCode) {
+      const area = document.getElementById('response-area');
+      const box = document.getElementById('response-box');
+      const badge = document.getElementById('response-status');
+      area.classList.add('visible');
+      box.className = 'response-box' + (type ? ' ' + type : '');
+
+      if (statusCode) {
+        badge.textContent = statusCode;
+        badge.className = 'response-status ' + type;
+        badge.style.display = '';
+      } else {
+        badge.style.display = 'none';
+      }
+
+      if (type === 'loading') {
+        rawResponseText = '';
+        box.innerHTML = content;
+      } else {
+        rawResponseText = content;
+        const highlighted = Prism.highlight(content, Prism.languages.json, 'json');
+        box.innerHTML = '<pre class="language-json"><code class="language-json">' + highlighted + '</code></pre>';
+      }
+    }
+
+    function copyResponse() {
+      if (!rawResponseText) return;
+      navigator.clipboard.writeText(rawResponseText).then(() => showToast());
+    }
+
+async function runCode() {
+    showResponse('<span class="loading-dot"></span><span class="loading-dot"></span><span class="loading-dot"></span> Sending request...', 'loading');
+
+    try {
+        const response = await fetch('https://fastapi888.lukeenortaed.site/auth/kmutnb-sso/login', { 
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                code: document.getElementById('code-val').textContent
+            })
+        });
+
+        const data = await response.json();
+        const formatted = JSON.stringify(data, null, 2);
+
+        if (!response.ok) {
+            showResponse(formatted, 'error', response.status + ' ' + response.statusText);
+            return;
+        }
+
+        showResponse(formatted, 'success', response.status + ' OK');
+        console.log("Success! Status: " + response.status);
+
+    } catch (error) {
+        showResponse(error.message, 'error', 'Error');
+        console.error("Error:", error);
+    }
+}
   </script>
 </body>
 </html>

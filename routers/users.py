@@ -21,7 +21,7 @@ router = APIRouter()
 # ============================================================
 #                 SSO USER ROUTES 
 # ============================================================
-@router.post("/user/sso/info", tags=["Users"])
+@router.post("/user/kmutnb-sso/info", tags=["Users"])
 async def get_sso_user_info(payload: SSOUserInfo):
     async with httpx.AsyncClient() as client:
         try:

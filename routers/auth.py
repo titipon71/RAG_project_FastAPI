@@ -34,7 +34,7 @@ async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = 
 
 # --- KMUTNB SSO ---
 # Token Request
-@router.post("/auth/sso/kmutnb", tags=["Authentication"])
+@router.post("/auth/kmutnb-sso/login", tags=["Authentication"])
 async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)):
     try:
         # =========================
@@ -48,7 +48,7 @@ async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)
                     data={
                         "grant_type": "authorization_code",
                         "code": payload.code,
-                        "redirect_uri": settings.SSO_REDIRECT_URI,
+                        "redirect_uri": 'https://project-rag-six.vercel.app/callback',
                     }
                 )
         except httpx.RequestError as e:
@@ -61,13 +61,15 @@ async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)
 
         try:
             token_json = token_response.json()
+
         except Exception as e:
             logger.error(f"Invalid Token JSON: {e}", exc_info=True)
             raise HTTPException(status_code=502, detail="SSO ตอบกลับข้อมูล token ผิดรูปแบบ")
 
         access_token = token_json.get("access_token")
         if not access_token:
-            raise HTTPException(status_code=400, detail=f"ไม่ได้รับ access_token จาก SSO: {token_json}")
+            logger.error(f"SSO Token Missing access_token: {token_json}")
+            raise HTTPException(status_code=400, detail=f"code ถูกใช้แล้วหรือหมดอายุ \n รายละเอียด: {token_json}")
 
         # =========================
         # 2) ดึงข้อมูลผู้ใช้จาก SSO
@@ -94,6 +96,7 @@ async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)
 
         username = sso_data.get("profile", {}).get("username")
         if not username:
+            logger.error(f"SSO Missing username in profile: {sso_data}")
             raise HTTPException(status_code=400, detail=f"ไม่พบ username ในข้อมูล SSO: {sso_data}")
 
         # =========================
@@ -111,7 +114,8 @@ async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)
                     email=sso_data.get("profile", {}).get("email"),
                     account_type=sso_data.get("profile", {}).get("account_type"),
                     hashed_password=username,  # แนะนำให้เปลี่ยนใน production
-                    role=RoleUser.user
+                    role=RoleUser.user,
+                    file_size_id=1 # ค่าเริ่มต้นสำหรับขนาดไฟล์ (อาจปรับตามความเหมาะสม)
                 )
                 db.add(new_user)
                 await db.flush()

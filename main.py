@@ -11,9 +11,9 @@ from core.config import settings
 from core.tag import tags_metadata
 from core.cors import ALLOWED_ORIGINS, ALLOW_ORIGIN_REGEX
 from core.logging import apply_custom_logging
-
+import db.models
 # Routers
-from routers import auth, users, channels, files, session, events, statistics, api_key, utility
+from routers import auth, users, file_size, channels, files, session, events, statistics, api_key, utility
 
 # ============================================================
 #                  APP INITIALIZATION
@@ -40,6 +40,7 @@ app.add_middleware(
 # ---------- Register Routers ----------
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(file_size.router)
 app.include_router(channels.router)
 app.include_router(files.router)
 app.include_router(session.router)
