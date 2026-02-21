@@ -31,8 +31,8 @@ class ChannelOut(ORMBase):
     title: str
     description: Optional[str]
     status: RoleChannel
+    maximum_file_size: int
     created_at: datetime
-    # แก้จาก List[dict] เป็น List[FileDetail] เพื่อให้ validator ทำงาน
     files: List[FileDetail] 
     
     @field_validator('channels_id', mode='before')
@@ -55,6 +55,7 @@ class ChannelOneResponse(ORMBase):
     status: RoleChannel
     created_by_id: int = Field(validation_alias='created_by') # Map field DB
     created_by_name: str = "Unknown" # ต้องจัดการใน Router หรือใช้ property
+    maximum_file_size: int
     created_at: datetime
     file_count: int = 0
     files: List[FileDetail]

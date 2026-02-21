@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 # --- Public API Key Schemas ---
 class ApiKeyCreate(BaseModel):
-    name: str
+    name: Optional[str] = None
     channel_id: Optional[str] = None
     
 

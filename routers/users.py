@@ -6,7 +6,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from sqlalchemy.orm import joinedload
 from core.enums import RoleUser
 from core.security import get_current_user, verify_password
 from db.session import get_db
@@ -167,7 +167,7 @@ async def list_users(
 ):
     if current_user.role != RoleUser.admin:
         raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
-    stmt = select(User).offset(skip).limit(limit)
+    stmt = select(User).options(joinedload(User.file_size)).offset(skip).limit(limit)
     result = await db.execute(stmt)
     users = result.scalars().all()
     return users
@@ -179,6 +179,29 @@ async def get_user_by_token(current_user: User = Depends(get_current_user)):
         "users_id": current_user.users_id,
         "username": current_user.username,
         "name": current_user.name,
+        "account_type": current_user.account_type,
+        "file_size_id": current_user.file_size_id,
+        "file_size": current_user.file_size.size if current_user.file_size else None,
         "email": current_user.email,
         "role": current_user.role,
     }
+
+
+@router.put('/role/update/{user_id}/{new_role}', response_model=UserOut, tags=["Users"])
+async def update_role(
+    user_id: int = Path(..., gt=0),
+    new_role: RoleUser = Path(...),
+    db: AsyncSession = Depends(get_db),
+):
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
+    user.role = new_role
+    await db.flush()
+    await db.refresh(user)
+
+    return user
+
+@router.get('/role/list', tags=["Users"])
+async def get_all_roles():
+    return list(RoleUser)

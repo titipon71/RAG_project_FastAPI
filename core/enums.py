@@ -17,3 +17,8 @@ class Theme(str, enum.Enum):
 class ModerationDecision(str, enum.Enum):
     approved = "approved"
     rejected = "rejected"
+    
+class SSOLoginType(str, enum.Enum):
+    fastapi = "fastapi"
+    vercel = "vercel"
+    local = "local"

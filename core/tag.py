@@ -8,6 +8,10 @@ tags_metadata = [
         "description": "จัดการผู้ใช้งาน (CRUD) และการเปลี่ยนรหัสผ่าน",
     },
     {
+        "name": "File Size",
+        "description": "CRUD ขนาดไฟล์ที่สามารถอัปโหลดได้ของแต่ละ user",
+    },
+    {
         "name": "Channels",
         "description": "การจัดการห้องแชท (Create, Update, Delete) และสถานะ Public/Private",
     },
@@ -29,7 +33,7 @@ tags_metadata = [
     },
     {
         "name": "Statistics",
-        "description": "ดูสถิติการใช้งาน (Admin Only)",
+        "description": "ดูสถิติการใช้งาน",
     },
     {
         "name": "Public API",
@@ -38,9 +42,5 @@ tags_metadata = [
     {
         "name": "System & Utility",
         "description": "Health check, Debug และ Demo tools",
-    },
-    {
-        "name": "File Size",
-        "description": "CRUD ขนาดไฟล์ที่สามารถอัปโหลดได้ของแต่ละ user",
     }
 ]

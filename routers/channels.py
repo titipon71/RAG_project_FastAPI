@@ -116,7 +116,12 @@ async def get_channel_details(
     ):
     
     decoded_channel_id = decode_id(channel_id)
-    result = await db.execute(select(Channel).where(Channel.channels_id == decoded_channel_id))
+    result = await db.execute(
+        select(Channel)
+        .where(Channel.channels_id == decoded_channel_id)
+        .options(
+            joinedload(Channel.creator)
+            .selectinload(User.file_size)))
     channel = result.scalar_one_or_none()
     if channel is None:
         raise HTTPException(status_code=404, detail="ไม่พบช่อง Channel")
@@ -150,6 +155,7 @@ async def get_channel_details(
         "title": channel.title,
         "description": channel.description,
         "status": channel.status,
+        "maximum_file_size": channel.creator.file_size.size,
         "created_at": channel.created_at,
         "files": file_list
     }
@@ -608,7 +614,7 @@ async def list_pending_channels(
     stmt = (
         select(Channel)
         .options(
-            joinedload(Channel.creator), 
+            joinedload(Channel.creator).joinedload(User.file_size), 
             selectinload(Channel.files) 
         )
         .where(Channel.status == RoleChannel.pending)
@@ -646,6 +652,7 @@ async def list_pending_channels(
             status=ch.status,
             created_by_id=ch.created_by,
             created_by_name=ch.creator.name if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
+            maximum_file_size=ch.creator.file_size.size,
             created_at=ch.created_at,
             file_count=len(ch.files),
             files=file_list,
@@ -665,7 +672,7 @@ async def list_public_channels(
     stmt = (
         select(Channel)
         .options(
-            joinedload(Channel.creator), # ดึงข้อมูลคนสร้าง (User)
+            joinedload(Channel.creator).joinedload(User.file_size), # ดึงข้อมูลคนสร้าง (User)
             selectinload(Channel.files)  # ดึงข้อมูลไฟล์ (Files)
         )
         .where(Channel.status == RoleChannel.public)
@@ -707,6 +714,7 @@ async def list_public_channels(
             status=ch.status,
             created_by_id=ch.created_by,
             created_by_name=ch.creator.name if ch.creator else "Unknown", # ดึงชื่อจาก Relation
+            maximum_file_size=ch.creator.file_size.size if ch.creator and ch.creator.file_size else None,
             created_at=ch.created_at,
             file_count=len(ch.files),
             files=file_list,
@@ -726,7 +734,7 @@ async def list_my_channels(
     stmt = (
         select(Channel)
         .options(
-            joinedload(Channel.creator), 
+            joinedload(Channel.creator).joinedload(User.file_size),
             selectinload(Channel.files) 
         )
         .where(Channel.created_by == current_user.users_id)
@@ -767,6 +775,7 @@ async def list_my_channels(
             created_at=ch.created_at,
             file_count=len(ch.files),
             files=file_list,
+            maximum_file_size=ch.creator.file_size.size if ch.creator and ch.creator.file_size else None,
         ))
     return channel_list
 
@@ -784,7 +793,7 @@ async def list_all_channels(
     stmt = (
         select(Channel)
         .options(
-            joinedload(Channel.creator), 
+            joinedload(Channel.creator).joinedload(User.file_size), 
             selectinload(Channel.files) 
         )
         .order_by(Channel.created_at.desc())
@@ -824,5 +833,6 @@ async def list_all_channels(
             created_at=ch.created_at,
             file_count=len(ch.files),
             files=file_list,
+            maximum_file_size=ch.creator.file_size.size
         ))
     return channel_list

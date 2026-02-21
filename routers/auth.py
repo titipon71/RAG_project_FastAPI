@@ -1,14 +1,15 @@
 import logging
+from xmlrpc import client
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from core.enums import RoleUser
+from core.enums import RoleUser, SSOLoginType
 from core.security import create_access_token
 from db.session import get_db
 from db.models.user import User
@@ -35,12 +36,41 @@ async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = 
 # --- KMUTNB SSO ---
 # Token Request
 @router.post("/auth/kmutnb-sso/login", tags=["Authentication"])
-async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)):
+async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
+            "fastapi": {
+                "summary": "FastAPI environment",
+                "value": {"code": "abc123", "type": "fastapi"}
+            },
+            "vercel": {
+                "summary": "Vercel environment",
+                "value": {"code": "abc123", "type": "vercel"}
+            },
+            "local": {
+                "summary": "Local environment",
+                "value": {"code": "abc123", "type": "local"}
+            }
+        }), db: AsyncSession = Depends(get_db)):
     try:
         # =========================
         # 1) ขอ Token จาก SSO
         # =========================
         try:
+            if payload.type is None:
+                redirect_uri = "https://fastapi888.lukeenortaed.site/callback"
+
+            elif payload.type == SSOLoginType.fastapi:
+                redirect_uri = "https://fastapi888.lukeenortaed.site/callback"
+
+            elif payload.type == SSOLoginType.vercel:
+                redirect_uri = "https://project-rag-six.vercel.app/callback"
+
+            elif payload.type == SSOLoginType.local:
+                redirect_uri = "http://localhost:3000/callback"
+
+            else:
+                logger.error(f"Invalid SSOLoginType: {payload.type}")
+                raise HTTPException(status_code=400, detail="Invalid SSO login type")
+                
             async with httpx.AsyncClient() as client:
                 token_response = await client.post(
                     settings.SSO_TOKEN_URL,
@@ -48,7 +78,7 @@ async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)
                     data={
                         "grant_type": "authorization_code",
                         "code": payload.code,
-                        "redirect_uri": 'https://project-rag-six.vercel.app/callback',
+                        "redirect_uri": redirect_uri,
                     }
                 )
         except httpx.RequestError as e:
@@ -142,6 +172,7 @@ async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)
             "message": "SSO login successful",
             "user_id": user.users_id,
             "username": user.username,
+            "name": user.name,
             "account_type": user.account_type,
             "local_access_token": create_access_token(
                 data={"sub": str(user.users_id)}
@@ -159,3 +190,16 @@ async def sso_kmutnb(payload: SSOCodeRequest, db: AsyncSession = Depends(get_db)
             status_code=500,
             detail="Internal Server Error"
         )
+        
+@router.post("/auth/kmutnb-sso/logout", tags=["Authentication"])
+async def sso_logout():
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.post(
+                "https://sso.kmutnb.ac.th/site/logout")
+            
+        except httpx.RequestError as e:
+            logger.error(f"SSO Logout Request Error: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail="ไม่สามารถเชื่อมต่อ SSO Server ได้")
+    # ในการ logout จริงๆ อาจต้องทำ token revocation กับ SSO provider ด้วย
+    return {"message": "SSO logout successful"}

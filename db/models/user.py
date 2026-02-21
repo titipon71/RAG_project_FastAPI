@@ -12,9 +12,7 @@ from core.enums import RoleUser
 class User(Base):
     __tablename__ = "users"
 
-    users_id: Mapped[int] = mapped_column(
-        "users_id", MyInt(unsigned=True), primary_key=True, autoincrement=True,
-    )
+    users_id: Mapped[int] = mapped_column("users_id", MyInt(unsigned=True), primary_key=True, autoincrement=True,)
     username: Mapped[str] = mapped_column("username", String(255), nullable=False)
     name: Mapped[str] = mapped_column("name", String(255), unique=True, index=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column("hashed_password", String(255), nullable=False)

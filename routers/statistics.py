@@ -62,8 +62,55 @@ async def number_of_questions_asked_per_day(
         {"date": row.date, "count": row.count} 
         for row in data
     ]
+
+@router.get("/questions/stats/only-channel", tags=["Statistics"])
+async def number_of_questions_asked_per_day(
+    start_date: date | None = Query(None, description="วันเริ่มต้น (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="วันสิ้นสุด (YYYY-MM-DD)"),
+    year: int | None = Query(None, ge=2000, le=2100, description="ปีที่ต้องการ (เช่น 2025)"),
+    month: int | None = Query(None, ge=1, le=12, description="เดือนที่ต้องการ (1-12)"),
+    day: int | None = Query(None, ge=1, le=31, description="วันที่ต้องการ (1-31)"),
+    channel_id: int | None = Query(None, description="ID ของ Channel ที่ต้องการดูสถิติ"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
+
+    # Group by Date (ตัดเวลาทิ้ง เอาแค่วันที่)
+    stmt = (
+        select(
+            cast(Chats.created_at, Date).label("date"), 
+            func.count().label("count")
+        ).where(Chats.channels_id == channel_id)
+    )
     
-@router.get("/users/stats/daily", tags=["Statistics"])
+    # --- Date Range Filter ---
+    if start_date:
+        stmt = stmt.where(cast(Chats.created_at, Date) >= start_date)
+    if end_date:
+        stmt = stmt.where(cast(Chats.created_at, Date) <= end_date)
+    
+    # --- Year / Month / Day Filter ---
+    if year:
+        stmt = stmt.where(func.year(Chats.created_at) == year)
+    if month:
+        stmt = stmt.where(func.month(Chats.created_at) == month)
+    if day:
+        stmt = stmt.where(func.day(Chats.created_at) == day)
+    
+    stmt = stmt.group_by(cast(Chats.created_at, Date)).order_by(cast(Chats.created_at, Date))
+
+    result = await db.execute(stmt)
+    data = result.all()
+    
+    # แปลงผลลัพธ์เป็น List of Dict
+    return [
+        {"date": row.date, "count": row.count} 
+        for row in data
+    ]
+    
+@router.get("/users/stats/only-channel", tags=["Statistics"])
 async def number_of_active_users_per_day(
     start_date: date | None = Query(None, description="วันเริ่มต้น (YYYY-MM-DD)"),
     end_date: date | None = Query(None, description="วันสิ้นสุด (YYYY-MM-DD)"),
@@ -82,6 +129,53 @@ async def number_of_active_users_per_day(
             cast(Chats.created_at, Date).label("date"), 
             func.count(func.distinct(Chats.users_id)).label("active_users")
         )
+    )
+    
+    # --- Date Range Filter ---
+    if start_date:
+        stmt = stmt.where(cast(Chats.created_at, Date) >= start_date)
+    if end_date:
+        stmt = stmt.where(cast(Chats.created_at, Date) <= end_date)
+    
+    # --- Year / Month / Day Filter ---
+    if year:
+        stmt = stmt.where(func.year(Chats.created_at) == year)
+    if month:
+        stmt = stmt.where(func.month(Chats.created_at) == month)
+    if day:
+        stmt = stmt.where(func.day(Chats.created_at) == day)
+    
+    stmt = stmt.group_by(cast(Chats.created_at, Date)).order_by(cast(Chats.created_at, Date))
+
+    result = await db.execute(stmt)
+    data = result.all()
+    
+    # แปลงผลลัพธ์เป็น List of Dict
+    return [
+        {"date": row.date, "active_users": row.active_users} 
+        for row in data
+    ]
+
+@router.get("/users/stats/daily", tags=["Statistics"])
+async def number_of_active_users_per_day(
+    start_date: date | None = Query(None, description="วันเริ่มต้น (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="วันสิ้นสุด (YYYY-MM-DD)"),
+    year: int | None = Query(None, ge=2000, le=2100, description="ปีที่ต้องการ (เช่น 2025)"),
+    month: int | None = Query(None, ge=1, le=12, description="เดือนที่ต้องการ (1-12)"),
+    day: int | None = Query(None, ge=1, le=31, description="วันที่ต้องการ (1-31)"),
+    channel_id: int | None = Query(None, description="ID ของ Channel ที่ต้องการดูสถิติ"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
+
+    # Group by Date (ตัดเวลาทิ้ง เอาแค่วันที่)
+    stmt = (
+        select(
+            cast(Chats.created_at, Date).label("date"), 
+            func.count(func.distinct(Chats.users_id)).label("active_users")
+        ).where(Chats.channels_id == channel_id)
     )
     
     # --- Date Range Filter ---

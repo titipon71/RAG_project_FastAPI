@@ -627,7 +627,8 @@ async function runCode() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                code: document.getElementById('code-val').textContent
+                code: document.getElementById('code-val').textContent,
+                type: "fastapi"
             })
         });
 

@@ -24,6 +24,7 @@ class UserOut(ORMBase):
     name: str
     email: Optional[EmailStr] = None
     role: RoleUser
+    account_type: Optional[str] = None
     created_at: datetime
 
 class UserUpdate(BaseModel):
