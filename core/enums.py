@@ -4,6 +4,7 @@ import enum
 class RoleUser(str, enum.Enum):
     user = "user"
     admin = "admin"
+    special = "special"
 
 class RoleChannel(str, enum.Enum):
     public = "public"
@@ -22,3 +23,4 @@ class SSOLoginType(str, enum.Enum):
     fastapi = "fastapi"
     vercel = "vercel"
     local = "local"
+    local2 = "local2"

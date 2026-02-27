@@ -8,6 +8,7 @@ from typing import List, Tuple
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from core.enums import RoleChannel, RoleUser
 from core.hashids import encode_id, decode_id
@@ -72,12 +73,11 @@ async def create_api_key(
 
         # ===== สร้าง API Key =====
         raw_key = "sk-" + secrets.token_urlsafe(32)
-        hashed = hash_key(raw_key)
 
         new_key = ApiKey(
             user_id=current_user.users_id,
             channel_id=real_channel_id,
-            key_hash=hashed,
+            key_hash=raw_key,
             name=payload.name
         )
 
@@ -139,7 +139,7 @@ async def list_api_keys(
     current_user: User = Depends(get_current_user)
 ):
     try:
-        stmt = select(ApiKey).where(ApiKey.user_id == current_user.users_id)
+        stmt = select(ApiKey).options(joinedload(ApiKey.channel)).where(ApiKey.user_id == current_user.users_id)
         result = await db.execute(stmt)
         keys = result.scalars().all()
 
@@ -148,8 +148,8 @@ async def list_api_keys(
             response.append(ApiKeyListResponse(
                 key_id=key.key_id,
                 name=key.name,
-                channel_id=encode_id(key.channel_id) if key.channel_id else None,
-                key_hint=f"*********{key.key_hash[-4:]}",  # Key จริงที่ยังไม่ Hash (ไม่ส่งกลับใน list)
+                channel_name=key.channel.title if key.channel else "N/A",
+                key_hint=key.key_hash if key.key_hash else "N/A",
                 created_at=key.created_at or datetime.now()
             ))
 

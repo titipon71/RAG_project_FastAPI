@@ -56,6 +56,7 @@ class ChannelOneResponse(ORMBase):
     created_by_id: int = Field(validation_alias='created_by') # Map field DB
     created_by_name: str = "Unknown" # ต้องจัดการใน Router หรือใช้ property
     maximum_file_size: int
+    search_key : str
     created_at: datetime
     file_count: int = 0
     files: List[FileDetail]

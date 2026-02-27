@@ -9,3 +9,7 @@ class FileSizeUpdate(ORMBase):
     id: int
     size: int
     
+class FileSizeDefaultUpdate(ORMBase):
+    account_type_id: int
+    size: int
+    

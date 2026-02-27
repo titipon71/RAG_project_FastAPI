@@ -24,6 +24,6 @@ class ApiKeyResponse(BaseModel):
 class ApiKeyListResponse(BaseModel):
     key_id: int
     name: str
-    channel_id: Optional[str]
+    channel_name: Optional[str] = None
     key_hint: str
     created_at: datetime

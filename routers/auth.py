@@ -67,6 +67,9 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
             elif payload.type == SSOLoginType.local:
                 redirect_uri = "http://localhost:3000/callback"
 
+            elif payload.type == SSOLoginType.local2:
+                redirect_uri = "http://127.0.0.1:3000/callback"
+            
             else:
                 logger.error(f"Invalid SSOLoginType: {payload.type}")
                 raise HTTPException(status_code=400, detail="Invalid SSO login type")

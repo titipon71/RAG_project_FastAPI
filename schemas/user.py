@@ -1,9 +1,10 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
 
 from core.enums import RoleUser
+from db.models.file_size import FileSize
 from schemas.base import ORMBase
 
 # --- SSO User Schemas ---
@@ -16,13 +17,25 @@ class UserCreate(BaseModel):
     username: str
     name: str
     password: str
-    email: Optional[EmailStr] = None
+
+class UserOutV2(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    users_id: int
+    username: str
+    name: str
+    role: RoleUser
+    account_type: Optional[str] = None
+
+    file_size_id: Optional[int] = None
+    file_size: Optional[int] = None 
+
+    created_at: datetime
 
 class UserOut(ORMBase):
     users_id: int
     username: str
     name: str
-    email: Optional[EmailStr] = None
     role: RoleUser
     account_type: Optional[str] = None
     created_at: datetime
@@ -30,7 +43,10 @@ class UserOut(ORMBase):
 class UserUpdate(BaseModel):
     username: Optional[str] = None
     name: Optional[str] = None
-    email: Optional[EmailStr] = None
+    
+class UserFileSizeUpdate(BaseModel):
+    users_id: int
+    file_size: int
 
 class UserPasswordUpdate(BaseModel):
     old_password: str

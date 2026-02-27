@@ -4,11 +4,13 @@ import pathlib
 import secrets
 import shutil
 from datetime import datetime, timezone
+import traceback
 from typing import List, Optional
 
 import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Path
 from fastapi.responses import JSONResponse
+from nanoid import generate
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -18,6 +20,7 @@ from core.config import settings
 from core.enums import RoleChannel, ModerationDecision, RoleUser
 from core.hashids import encode_id, decode_id
 from core.security import get_current_user
+from db.models.account_type import AccountType
 from db.session import get_db
 from db.models.user import User
 from db.models.channel import Channel
@@ -98,6 +101,7 @@ async def create_channel(
         title=channel_in.title,
         description=channel_in.description,
         created_by=current_user.users_id,
+        search_key=generate(size=10),  # สร้าง search_key แบบสุ่ม (หรือจะใช้ hashids จาก ID ก็ได้)
         status=RoleChannel.private
     )
 
@@ -114,51 +118,76 @@ async def get_channel_details(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
     ):
-    
-    decoded_channel_id = decode_id(channel_id)
-    result = await db.execute(
-        select(Channel)
-        .where(Channel.channels_id == decoded_channel_id)
-        .options(
-            joinedload(Channel.creator)
-            .selectinload(User.file_size)))
-    channel = result.scalar_one_or_none()
-    if channel is None:
-        raise HTTPException(status_code=404, detail="ไม่พบช่อง Channel")
-    
-    is_private_like = channel.status in (RoleChannel.private , RoleChannel.pending)
-    is_owner = channel.created_by == current_user.users_id
-    is_admin = current_user.role == RoleUser.admin
+    try:
+        decoded_channel_id = decode_id(channel_id)
+        stmt = (
+            select(Channel)
+            .options(
+                joinedload(Channel.creator).joinedload(User.file_size),
+                joinedload(Channel.creator).joinedload(User.account_type_rel).joinedload(AccountType.file_size),                
+                selectinload(Channel.files) 
+            )
+            .where(Channel.channels_id == decoded_channel_id)
+        )
+        result = await db.execute(stmt)
+        channel = result.scalar_one_or_none()
+        if channel is None:
+            raise HTTPException(status_code=404, detail="ไม่พบช่อง Channel")
         
-    # ตรวจสอบสิทธิ์การเข้าถึง
-    if is_private_like and not (is_owner or is_admin):
-        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์เข้าถึง channel")
-    
-    # ดึงรายการไฟล์ที่อยู่ใน channel นี้
-    result = await db.execute(select(File).where(File.channel_id == channel_id))
-    files = result.scalars().all()
-    
-    file_list = []
-    for f in files:
-        item = {
-            "files_id": f.files_id,
-            "original_filename": f.original_filename,
-            "size_bytes": f.size_bytes,
-            "created_at": f.created_at,
+        is_private_like = channel.status in (RoleChannel.private , RoleChannel.pending)
+        is_owner = channel.created_by == current_user.users_id
+        is_admin = current_user.role == RoleUser.admin
+            
+        # ตรวจสอบสิทธิ์การเข้าถึง
+        if is_private_like and not (is_owner or is_admin):
+            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์เข้าถึง channel")
+        
+        # ดึงรายการไฟล์ที่อยู่ใน channel นี้
+        creator = channel.creator
+
+        max_size = None
+        if creator:
+            if creator.file_size:
+                max_size = creator.file_size.size
+            elif (
+                creator.account_type_rel
+                and creator.account_type_rel.file_size
+            ):
+                max_size = creator.account_type_rel.file_size.size
+        
+        file_list = []
+        for f in channel.files:
+            item = {
+                "files_id": f.files_id,
+                "original_filename": f.original_filename,
+                "size_bytes": f.size_bytes,
+                "created_at": f.created_at,
+            }
+
+            if channel.status == RoleChannel.public:
+                item["public_url"] = f"/static/uploads/{f.storage_uri}"
+
+            file_list.append(item)
+        
+        return {
+            "channels_id": channel.channels_id,
+            "title": channel.title,
+            "description": channel.description,
+            "status": channel.status,
+            "maximum_file_size": max_size,
+            "created_at": channel.created_at,
+            "files": file_list
         }
-        if channel.status == RoleChannel.public:
-            item["public_url"] = f"/static/uploads/{f.storage_uri}"
-        file_list.append(item)
-    
-    return {
-        "channels_id": channel.channels_id,
-        "title": channel.title,
-        "description": channel.description,
-        "status": channel.status,
-        "maximum_file_size": channel.creator.file_size.size,
-        "created_at": channel.created_at,
-        "files": file_list
-    }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_traceback = traceback.format_exc()
+        logger.error(f"Error in get_channel_details: {str(e)}\n{error_traceback}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal Error: {str(e)}"
+        )
 
 
 @router.delete("/channels/{channel_id}", tags=["Channels"])
@@ -627,7 +656,7 @@ async def list_pending_channels(
     stmt = stmt.offset(skip).limit(limit)
 
     result = await db.execute(stmt)
-    channels = result.scalars().all()
+    channels = result.unique().scalars().all()
 
     channel_list = []
     for ch in channels:
@@ -652,7 +681,7 @@ async def list_pending_channels(
             status=ch.status,
             created_by_id=ch.created_by,
             created_by_name=ch.creator.name if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
-            maximum_file_size=ch.creator.file_size.size,
+            maximum_file_size=ch.creator.file_size.size if ch.creator and ch.creator.file_size else None, # เข้าถึงผ่าน relationship
             created_at=ch.created_at,
             file_count=len(ch.files),
             files=file_list,
@@ -663,176 +692,265 @@ async def list_pending_channels(
 
 @router.get("/channels/public/list/", response_model=List[ChannelListPublicItem], tags=["Channels"])
 async def list_public_channels(
-    search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
+    search_by_name_and_key: str | None = Query(None, description="ค้นหาจากชื่อหรือ search_key"),
     skip: int = 0,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
 ):
     # 1. สร้าง Base Query พร้อม Eager Load (ดึง User และ Files ทีเดียว)
-    stmt = (
-        select(Channel)
-        .options(
-            joinedload(Channel.creator).joinedload(User.file_size), # ดึงข้อมูลคนสร้าง (User)
-            selectinload(Channel.files)  # ดึงข้อมูลไฟล์ (Files)
+    try:
+        stmt = (
+            select(Channel)
+            .options(
+                joinedload(Channel.creator).joinedload(User.file_size),
+                
+                joinedload(Channel.creator).joinedload(User.account_type_rel).joinedload(AccountType.file_size),
+                
+                selectinload(Channel.files) 
+            )
+            .where(Channel.status == RoleChannel.public)
+            .order_by(Channel.created_at.desc())
         )
-        .where(Channel.status == RoleChannel.public)
-        .order_by(Channel.created_at.desc())
-    )
 
-    # 2. ใส่ Filter (Where) ก่อน Pagination
-    if search_by_name:
-        stmt = stmt.where(func.lower(Channel.title).contains(search_by_name.lower()))
+        if search_by_name_and_key:
+            stmt = stmt.where(
+                func.lower(Channel.title).contains(search_by_name_and_key.lower()) |
+                func.lower(Channel.search_key).contains(search_by_name_and_key.lower())
+            )
 
-    # 3. ปิดท้ายด้วย Pagination (Offset/Limit)
-    stmt = stmt.offset(skip).limit(limit)
+        stmt = stmt.offset(skip).limit(limit)
 
-    result = await db.execute(stmt)
-    channels = result.scalars().all()
+        result = await db.execute(stmt)
+        # จุดตายที่ 1: สำหรับ SQLAlchemy Async ถ้ามี joinedload ต้องใช้ .unique()
+        channels = result.unique().scalars().all() 
 
-    # 4. แปลงข้อมูล (ไม่ต้อง Query เพิ่มแล้ว เพราะดึงมาหมดแล้วข้างบน)
-    channel_list = []
-    for ch in channels:
+        channel_list = []
+        for ch in channels:
+            # Logic การดึงค่าเหมือนที่ทำในหน้า userinfo
+            acc_type = ch.creator.account_type_rel if ch.creator else None
+            
+            # จุดตายที่ 2: การคำนวณค่าใน Loop
+            max_size = None
+            if ch.creator:
+                if ch.creator.file_size:
+                    max_size = ch.creator.file_size.size
+                elif acc_type and acc_type.file_size:
+                    max_size = acc_type.file_size.size
+
+            file_list = [
+                {
+                    "files_id": f.files_id,
+                    "original_filename": f.original_filename,
+                    "storage_uri": f.storage_uri,
+                    "size_bytes": f.size_bytes,
+                    "created_at": f.created_at,
+                    "channel_id": f.channel_id,
+                    "mime": None,
+                }
+                for f in ch.files
+            ]
+
+            channel_list.append(ChannelOneResponse(
+                channels_id=ch.channels_id,
+                title=ch.title,
+                description=ch.description,
+                status=ch.status,
+                created_by_id=ch.created_by,
+                created_by_name=ch.creator.name if ch.creator else "Unknown",
+                created_at=ch.created_at,
+                file_count=len(ch.files),
+                files=file_list,
+                maximum_file_size=max_size,
+                search_key=ch.search_key,
+            ))
+            
+        return channel_list
+    
+    except Exception as e:
+        # พิมพ์ Error แบบละเอียดลงใน Terminal/Log
+        error_traceback = traceback.format_exc()
+        logger.error(f"Error in list_public_channels: {str(e)}\n{error_traceback}")
         
-        # Map ไฟล์จาก memory ได้เลย
-        file_list = [
-            {
-                "files_id": f.files_id,
-                "original_filename": f.original_filename,
-                "storage_uri": f.storage_uri,
-                "size_bytes": f.size_bytes,
-                "created_at": f.created_at,
-                "channel_id": f.channel_id,  # เพิ่ม channel_id (จำเป็น)
-                "mime": None,
-            }
-            for f in ch.files
-        ]
-
-        channel_list.append(ChannelListPublicItem(
-            channels_id=ch.channels_id,
-            title=ch.title,
-            description=ch.description,
-            status=ch.status,
-            created_by_id=ch.created_by,
-            created_by_name=ch.creator.name if ch.creator else "Unknown", # ดึงชื่อจาก Relation
-            maximum_file_size=ch.creator.file_size.size if ch.creator and ch.creator.file_size else None,
-            created_at=ch.created_at,
-            file_count=len(ch.files),
-            files=file_list,
-        ))
-
-    return channel_list
+        # ส่งรายละเอียดกลับไปที่ Client (เฉพาะตอน Debug)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal Error: {str(e)}" # หรือส่ง error_traceback ถ้าอยากเห็นบน Postman
+        )
+    
 
 @router.get("/channels/list/", response_model=List[ChannelOneResponse], tags=["Channels"])
 async def list_my_channels(
-    search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
+    search_by_name_and_key: str | None = Query(None, description="ค้นหาจากชื่อหรือ search_key"),
     skip: int = Query(0, ge=0, description="ข้ามจำนวนรายการ (Pagination)"),
     limit: int = Query(100, ge=1, le=150, description="จำนวนรายการต่อหน้า"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    
-    stmt = (
-        select(Channel)
-        .options(
-            joinedload(Channel.creator).joinedload(User.file_size),
-            selectinload(Channel.files) 
+    try:
+        stmt = (
+            select(Channel)
+            .options(
+                joinedload(Channel.creator).joinedload(User.file_size),
+                joinedload(Channel.creator).joinedload(User.account_type_rel).joinedload(AccountType.file_size),                
+                selectinload(Channel.files) 
+            )
+            .where(Channel.created_by == current_user.users_id)
+            .order_by(Channel.created_at.desc())
         )
-        .where(Channel.created_by == current_user.users_id)
-        .order_by(Channel.created_at.desc())
-    )
 
-    if search_by_name:
-        stmt = stmt.where(func.lower(Channel.title).contains(search_by_name.lower()))
+        if search_by_name_and_key:
+            stmt = stmt.where(
+                func.lower(Channel.title).contains(search_by_name_and_key.lower()) |
+                func.lower(Channel.search_key).contains(search_by_name_and_key.lower())
+            )
 
-    stmt = stmt.offset(skip).limit(limit)
+        stmt = stmt.offset(skip).limit(limit)
 
-    result = await db.execute(stmt)
-    channels = result.scalars().all()
+        result = await db.execute(stmt)
+        # จุดตายที่ 1: สำหรับ SQLAlchemy Async ถ้ามี joinedload ต้องใช้ .unique()
+        channels = result.unique().scalars().all() 
 
-    channel_list = []
-    for ch in channels:
+        channel_list = []
+        for ch in channels:
+            # Logic การดึงค่าเหมือนที่ทำในหน้า userinfo
+            acc_type = ch.creator.account_type_rel if ch.creator else None
+            
+            # จุดตายที่ 2: การคำนวณค่าใน Loop
+            max_size = None
+            if ch.creator:
+                if ch.creator.file_size:
+                    max_size = ch.creator.file_size.size
+                elif acc_type and acc_type.file_size:
+                    max_size = acc_type.file_size.size
+
+            file_list = [
+                {
+                    "files_id": f.files_id,
+                    "original_filename": f.original_filename,
+                    "storage_uri": f.storage_uri,
+                    "size_bytes": f.size_bytes,
+                    "created_at": f.created_at,
+                    "channel_id": f.channel_id,
+                    "mime": None,
+                }
+                for f in ch.files
+            ]
+
+            channel_list.append(ChannelOneResponse(
+                channels_id=ch.channels_id,
+                title=ch.title,
+                description=ch.description,
+                status=ch.status,
+                created_by_id=ch.created_by,
+                created_by_name=ch.creator.name if ch.creator else "Unknown",
+                created_at=ch.created_at,
+                file_count=len(ch.files),
+                files=file_list,
+                maximum_file_size=max_size,
+                search_key=ch.search_key,
+            ))
+            
+        return channel_list
+
+    except Exception as e:
+        # พิมพ์ Error แบบละเอียดลงใน Terminal/Log
+        error_traceback = traceback.format_exc()
+        logger.error(f"Error in list_my_channels: {str(e)}\n{error_traceback}")
         
-        file_list = [
-            {
-                "files_id": f.files_id,
-                "original_filename": f.original_filename,
-                "storage_uri": f.storage_uri,
-                "size_bytes": f.size_bytes,
-                "created_at": f.created_at,
-                "channel_id": f.channel_id,  # เพิ่ม channel_id (จำเป็น)
-                "mime": None,
-            }
-            for f in ch.files #
-        ]
-
-        channel_list.append(ChannelOneResponse(
-            channels_id=ch.channels_id,
-            title=ch.title,
-            description=ch.description,
-            status=ch.status,
-            created_by_id=ch.created_by,
-            created_by_name=ch.creator.name if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
-            created_at=ch.created_at,
-            file_count=len(ch.files),
-            files=file_list,
-            maximum_file_size=ch.creator.file_size.size if ch.creator and ch.creator.file_size else None,
-        ))
-    return channel_list
+        # ส่งรายละเอียดกลับไปที่ Client (เฉพาะตอน Debug)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal Error: {str(e)}" # หรือส่ง error_traceback ถ้าอยากเห็นบน Postman
+        )
 
 @router.get("/channels/list/all/", response_model=List[ChannelListAllItem], tags=["Channels"])
 async def list_all_channels(
-    search_by_name: str | None = Query(None, description="ค้นหาจากชื่อ"),
+    search_by_name_and_key: str | None = Query(None, description="ค้นหาจากชื่อหรือ search_key"),
     skip: int = 0,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
+    # if current_user.role != RoleUser.admin:
+    #     raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
 
-    stmt = (
-        select(Channel)
-        .options(
-            joinedload(Channel.creator).joinedload(User.file_size), 
-            selectinload(Channel.files) 
+    try:
+        stmt = (
+            select(Channel)
+            .options(
+                joinedload(Channel.creator)
+                    .joinedload(User.file_size),
+
+                joinedload(Channel.creator)
+                    .joinedload(User.account_type_rel)
+                    .joinedload(AccountType.file_size),
+
+                selectinload(Channel.files)
+            )
+            .order_by(Channel.created_at.desc())
         )
-        .order_by(Channel.created_at.desc())
-    )
 
-    if search_by_name:
-        stmt = stmt.where(func.lower(Channel.title).contains(search_by_name.lower()))
+        if search_by_name_and_key:
+            stmt = stmt.where(
+                func.lower(Channel.title).contains(search_by_name_and_key.lower()) |
+                func.lower(Channel.search_key).contains(search_by_name_and_key.lower())
+            )
 
-    stmt = stmt.offset(skip).limit(limit)
+        stmt = stmt.offset(skip).limit(limit)
 
-    result = await db.execute(stmt)
-    channels = result.scalars().all()
+        result = await db.execute(stmt)
+        # จุดตายที่ 1: สำหรับ SQLAlchemy Async ถ้ามี joinedload ต้องใช้ .unique()
+        channels = result.unique().scalars().all() 
 
-    channel_list = []
-    for ch in channels:
+        channel_list = []
+        for ch in channels:
+            # Logic การดึงค่าเหมือนที่ทำในหน้า userinfo
+            acc_type = ch.creator.account_type_rel if ch.creator else None
+            
+            # จุดตายที่ 2: การคำนวณค่าใน Loop
+            max_size = None
+            if ch.creator:
+                if ch.creator.file_size:
+                    max_size = ch.creator.file_size.size
+                elif acc_type and acc_type.file_size:
+                    max_size = acc_type.file_size.size
+
+            file_list = [
+                {
+                    "files_id": f.files_id,
+                    "original_filename": f.original_filename,
+                    "storage_uri": f.storage_uri,
+                    "size_bytes": f.size_bytes,
+                    "created_at": f.created_at,
+                    "channel_id": f.channel_id,
+                    "mime": None,
+                }
+                for f in ch.files
+            ]
+
+            channel_list.append(ChannelOneResponse(
+                channels_id=ch.channels_id,
+                title=ch.title,
+                description=ch.description,
+                status=ch.status,
+                created_by_id=ch.created_by,
+                created_by_name=ch.creator.name if ch.creator else "Unknown",
+                created_at=ch.created_at,
+                file_count=len(ch.files),
+                files=file_list,
+                maximum_file_size=max_size,
+                search_key=ch.search_key,
+            ))
+            
+        return channel_list
+
+    except Exception as e:
+        # พิมพ์ Error แบบละเอียดลงใน Terminal/Log
+        error_traceback = traceback.format_exc()
+        logger.error(f"Error in list_all_channels: {str(e)}\n{error_traceback}")
         
-        file_list = [
-            {
-                "files_id": f.files_id,
-                "original_filename": f.original_filename,
-                "storage_uri": f.storage_uri,
-                "size_bytes": f.size_bytes,
-                "created_at": f.created_at,
-                "channel_id": f.channel_id,  # เพิ่ม channel_id (จำเป็น)
-                "mime": None,
-            }
-            for f in ch.files #
-        ]
-
-        channel_list.append(ChannelListPendingItem(
-            channels_id=ch.channels_id,
-            title=ch.title,
-            description=ch.description,
-            status=ch.status,
-            created_by_id=ch.created_by,
-            created_by_name=ch.creator.name if ch.creator else "Unknown",
-            created_at=ch.created_at,
-            file_count=len(ch.files),
-            files=file_list,
-            maximum_file_size=ch.creator.file_size.size
-        ))
-    return channel_list
+        # ส่งรายละเอียดกลับไปที่ Client (เฉพาะตอน Debug)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal Error: {str(e)}" # หรือส่ง error_traceback ถ้าอยากเห็นบน Postman
+        )

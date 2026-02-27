@@ -1,4 +1,5 @@
 import logging
+import traceback
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Body
@@ -9,9 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 from core.enums import RoleUser
 from core.security import get_current_user, verify_password
+from db.models.account_type import AccountType
+from db.models.file_size import FileSize
 from db.session import get_db
 from db.models.user import User
-from schemas.user import UserCreate, UserOut, UserUpdate, UserPasswordUpdate, SSOUserInfo
+from schemas.user import UserCreate, UserFileSizeUpdate, UserOut, UserOutV2, UserUpdate, UserPasswordUpdate, SSOUserInfo
+from services.file_service import get_or_create_file_size
 from services.user_service import get_user_by_id
 
 logger = logging.getLogger("uvicorn.error")
@@ -45,7 +49,6 @@ async def register_user(payload: UserCreate, db: AsyncSession = Depends(get_db))
         username=payload.username,
         name=payload.name,
         hashed_password=payload.password,
-        email=payload.email,        
     )
     db.add(user)
     try:
@@ -72,7 +75,7 @@ async def get_user_by_id_api(
         raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
     return user
 
-# Update: Update user info (username, name, email)
+# Update: Update user info (username, name)
 @router.put("/users/{user_id}", response_model=UserOut, tags=["Users"])
 async def update_user(
     user_id: int,
@@ -85,18 +88,83 @@ async def update_user(
         raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
     if current_user.role != RoleUser.admin and current_user.users_id != user_id:
         raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
-    if payload.username is not None:
-        user.username = payload.username
-    if payload.name is not None:
-        user.name = payload.name
-    if payload.email is not None:
-        user.email = payload.email
+
     try:
-        await db.flush()
+        user.username = payload.username or user.username
+        user.name = payload.name or user.name
     except IntegrityError:
-        raise HTTPException(status_code=409, detail="ชื่อผู้ใช้, ชื่อ หรืออีเมลนี้มีอยู่ในระบบแล้ว")
+        raise HTTPException(status_code=409, detail="ชื่อหรืออีเมลนี้มีอยู่ในระบบแล้ว")
+
+    await db.flush()
     await db.refresh(user)
     return user
+
+from fastapi import HTTPException, status
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+
+
+@router.post("/users/file-size/", response_model=UserOut, tags=["Users"])
+async def update_user_file_size(
+    payload: UserFileSizeUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        # ✅ Permission check
+        if current_user.role != RoleUser.admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="ไม่มีสิทธิ์ดำเนินการ"
+            )
+
+        # ✅ Check user
+        user = await get_user_by_id(db, payload.users_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="ไม่พบผู้ใช้งาน"
+            )
+
+        # ✅ Get/Create file size
+        file_size = await get_or_create_file_size(
+            db,
+            payload.file_size
+        )
+
+        user.file_size_id = file_size.file_size_id
+
+        await db.flush()
+        await db.refresh(user)
+
+        return user
+
+    # ✅ DB constraint error
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail="ข้อมูลซ้ำหรือผิด constraint"
+        )
+
+    # ✅ SQLAlchemy error
+    except SQLAlchemyError as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Database error"
+        )
+
+    # ✅ FastAPI error (โยนต่อ)
+    except HTTPException:
+        raise
+
+    # ✅ Unknown error
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unexpected server error"
+        )
 
 @router.put("/users/password/{user_id}", status_code=204, tags=["Users"])
 async def update_user_password(
@@ -148,8 +216,6 @@ async def update_user_role(
     if not user:
         raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
 
-    if secret_key != "4+2*3=24":
-        raise HTTPException(status_code=403, detail="secret_key ไม่ถูกต้อง")
     logger.info(f"Admin {current_user.users_id} changed user {user_id} role to {new_role}")
     user.role = new_role
     await db.flush()
@@ -158,49 +224,102 @@ async def update_user_role(
     return user
 
 # Read: List all users (admin only)
-@router.get("/users/list/", response_model=List[UserOut], tags=["Users"])
+@router.get("/users/list/", response_model=List[UserOutV2], tags=["Users"])
 async def list_users(
     skip: int = 0,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    # current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
-    stmt = select(User).options(joinedload(User.file_size)).offset(skip).limit(limit)
-    result = await db.execute(stmt)
-    users = result.scalars().all()
-    return users
+    try:
+        # if current_user.role != RoleUser.admin:
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="ไม่มีสิทธิ์ดำเนินการ"
+        #     )
+
+        stmt = (
+            select(User)
+            .options(joinedload(User.file_size), 
+                     joinedload(User.account_type_rel).joinedload(AccountType.file_size))
+            .offset(skip)
+            .limit(limit)
+        )
+
+        result = await db.execute(stmt)
+        users = result.scalars().all()
+
+        return [
+            UserOutV2(
+                users_id=user.users_id,
+                username=user.username,
+                name=user.name,
+                role=user.role,
+                # แสดงชื่อประเภทบัญชี
+                account_type=user.account_type_rel.type_name if user.account_type_rel else None,
+                
+                # แสดง ID ที่ใช้งานจริง
+                file_size_id=user.file_size_default_id or user.account_type_rel.file_size_id,
+                
+                # Logic การดึงค่า Size (MB)
+                file_size=(
+                    user.file_size.size if user.file_size  # ถ้ามีค่าเฉพาะบุคคล
+                    else (user.account_type_rel.file_size.size if user.account_type_rel and user.account_type_rel.file_size else None) # ถ้าไม่มี ให้ใช้ค่า Default
+                ),
+                created_at=user.created_at,
+            )
+            for user in users
+        ]
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(f"Error listing users {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="เกิดข้อผิดพลาดในการดึงข้อมูลผู้ใช้งาน"
+        )
 
 # Protected endpoint
 @router.get("/get/userinfo/bytoken", tags=["Users"])
 async def get_user_by_token(current_user: User = Depends(get_current_user)):
-    return {
-        "users_id": current_user.users_id,
-        "username": current_user.username,
-        "name": current_user.name,
-        "account_type": current_user.account_type,
-        "file_size_id": current_user.file_size_id,
-        "file_size": current_user.file_size.size if current_user.file_size else None,
-        "email": current_user.email,
-        "role": current_user.role,
-    }
+    try:
+        acc_type = current_user.account_type_rel
 
+        return {
+            "users_id": current_user.users_id,
+            "username": current_user.username,
+            "name": current_user.name,
+            "role": current_user.role,
 
-@router.put('/role/update/{user_id}/{new_role}', response_model=UserOut, tags=["Users"])
-async def update_role(
-    user_id: int = Path(..., gt=0),
-    new_role: RoleUser = Path(...),
-    db: AsyncSession = Depends(get_db),
-):
-    user = await get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
-    user.role = new_role
-    await db.flush()
-    await db.refresh(user)
+            "account_type": acc_type.type_name if acc_type else None,
 
-    return user
+            "file_size_id": (
+                current_user.file_size_default_id
+                or (acc_type.file_size_id if acc_type else None)
+            ),
+
+            "file_size": (
+                current_user.file_size.size
+                if current_user.file_size
+                else (
+                    acc_type.file_size.size
+                    if acc_type and acc_type.file_size
+                    else None
+                )
+            ),
+        }
+
+    except Exception as e:
+        logger.exception("\n🔥 ERROR IN /get/userinfo/bytoken")
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
 
 @router.get('/role/list', tags=["Users"])
 async def get_all_roles():

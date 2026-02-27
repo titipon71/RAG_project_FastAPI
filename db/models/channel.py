@@ -18,6 +18,7 @@ class Channel(Base):
     description: Mapped[Optional[str]] = mapped_column("description", String(1000), nullable=True)
     status: Mapped[RoleChannel] = mapped_column("status", SAEnum(RoleChannel), nullable=False, default=RoleChannel.private, server_default=text("'private'"))
     created_by: Mapped[int] = mapped_column("created_by", MyInt(unsigned=True), ForeignKey("users.users_id"), nullable=False, index=True)
+    search_key: Mapped[str] = mapped_column("search_key", String(255), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
     files = relationship("File", back_populates="channel", cascade="all, delete-orphan")
