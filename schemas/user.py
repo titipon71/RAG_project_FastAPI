@@ -27,7 +27,6 @@ class UserOutV2(BaseModel):
     role: RoleUser
     account_type: Optional[str] = None
 
-    file_size_id: Optional[int] = None
     file_size: Optional[int] = None 
 
     created_at: datetime

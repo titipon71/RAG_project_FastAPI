@@ -15,7 +15,6 @@ from db.models.file_size import FileSize
 from db.session import get_db
 from db.models.user import User
 from schemas.user import UserCreate, UserFileSizeUpdate, UserOut, UserOutV2, UserUpdate, UserPasswordUpdate, SSOUserInfo
-from services.file_service import get_or_create_file_size
 from services.user_service import get_user_by_id
 
 logger = logging.getLogger("uvicorn.error")
@@ -103,21 +102,20 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 
-@router.post("/users/file-size/", response_model=UserOut, tags=["Users"])
+@router.patch("/users/file-size/", response_model=UserOut, tags=["Users"])
 async def update_user_file_size(
     payload: UserFileSizeUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
-        # ✅ Permission check
+        # Permission check
         if current_user.role != RoleUser.admin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="ไม่มีสิทธิ์ดำเนินการ"
             )
 
-        # ✅ Check user
         user = await get_user_by_id(db, payload.users_id)
         if not user:
             raise HTTPException(
@@ -125,42 +123,26 @@ async def update_user_file_size(
                 detail="ไม่พบผู้ใช้งาน"
             )
 
-        # ✅ Get/Create file size
-        file_size = await get_or_create_file_size(
-            db,
-            payload.file_size
-        )
-
-        user.file_size_id = file_size.file_size_id
-
+        user.file_size_custom = payload.file_size
+        
         await db.flush()
         await db.refresh(user)
 
         return user
 
-    # ✅ DB constraint error
-    except IntegrityError as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=400,
-            detail="ข้อมูลซ้ำหรือผิด constraint"
-        )
-
-    # ✅ SQLAlchemy error
-    except SQLAlchemyError as e:
+    except SQLAlchemyError:
         await db.rollback()
         raise HTTPException(
             status_code=500,
             detail="Database error"
         )
 
-    # ✅ FastAPI error (โยนต่อ)
     except HTTPException:
         raise
 
-    # ✅ Unknown error
-    except Exception as e:
+    except Exception:
         await db.rollback()
+        logger.exception("Unexpected server error")
         raise HTTPException(
             status_code=500,
             detail="Unexpected server error"
@@ -257,9 +239,6 @@ async def list_users(
                 role=user.role,
                 # แสดงชื่อประเภทบัญชี
                 account_type=user.account_type_rel.type_name if user.account_type_rel else None,
-                
-                # แสดง ID ที่ใช้งานจริง
-                file_size_id=user.file_size_default_id or user.account_type_rel.file_size_id,
                 
                 # Logic การดึงค่า Size (MB)
                 file_size=(

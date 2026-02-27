@@ -8,6 +8,10 @@ tags_metadata = [
         "description": "จัดการผู้ใช้งาน (CRUD) และการเปลี่ยนรหัสผ่าน",
     },
     {
+        "name": "Account Types",
+        "description": "จัดการประเภทบัญชีผู้ใช้งาน",
+    },
+    {
         "name": "File Size",
         "description": "CRUD ขนาดไฟล์ที่สามารถอัปโหลดได้ของแต่ละ user",
     },

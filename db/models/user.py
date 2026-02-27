@@ -18,11 +18,10 @@ class User(Base):
     name: Mapped[str] = mapped_column("name", String(255), unique=True, index=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column("hashed_password", String(255), nullable=False)
     account_type_id: Mapped[int] = mapped_column("account_type_id", MyInt(unsigned=True), ForeignKey("account_type.account_type_id"), nullable=True)
-    file_size_default_id: Mapped[int] = mapped_column("file_size_default_id", MyInt(unsigned=True),ForeignKey("file_size_default.file_size_default_id"), nullable=False)
     role: Mapped[RoleUser] = mapped_column("role", MyEnum(RoleUser), nullable=False, server_default=text("'user'"))
+    file_size_custom: Mapped[Optional[int]] = mapped_column("file_size_custom", MyInt(unsigned=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
     channels = relationship("Channel", back_populates="creator")
     uploaded_files = relationship("File", back_populates="uploader")
-    file_size = relationship("FileSize", back_populates="users")
     account_type_rel = relationship("AccountType", back_populates="users")

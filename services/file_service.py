@@ -4,31 +4,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models.file_size import FileSize
+from db.models.user import User
 
 
-async def get_or_create_file_size(
+async def change_user_file_size(
     db: AsyncSession,
     size: int,
-) -> FileSize:
+    user_id: int
+):
 
-    stmt = select(FileSize).where(FileSize.size == size)
+    stmt = select(User).where(User.users_id == user_id)
     result = await db.execute(stmt)
-    file_size = result.scalar_one_or_none()
+    user = result.scalar_one_or_none()
+    if not user:
+        raise ValueError("User not found")
 
-    if file_size:
-        return file_size
-
-    file_size = FileSize(size=size)
-    db.add(file_size)
-
-    try:
-        await db.flush()
-        return file_size
-
-    except IntegrityError:
-        await db.rollback()
-
-        result = await db.execute(
-            select(FileSize).where(FileSize.size == size)
-        )
-        return result.scalar_one()
+    user.file_size_custom = size
+    await db.flush()

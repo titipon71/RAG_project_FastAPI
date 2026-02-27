@@ -148,7 +148,6 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
                     account_type=sso_data.get("profile", {}).get("account_type"),
                     hashed_password=username,  # แนะนำให้เปลี่ยนใน production
                     role=RoleUser.user,
-                    file_size_id=1 # ค่าเริ่มต้นสำหรับขนาดไฟล์ (อาจปรับตามความเหมาะสม)
                 )
                 db.add(new_user)
                 await db.flush()
