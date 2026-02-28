@@ -27,7 +27,7 @@ class UserOutV2(BaseModel):
     role: RoleUser
     account_type: Optional[str] = None
 
-    file_size: Optional[int] = None 
+    file_size_byte: Optional[int] = None 
 
     created_at: datetime
 
@@ -45,7 +45,7 @@ class UserUpdate(BaseModel):
     
 class UserFileSizeUpdate(BaseModel):
     users_id: int
-    file_size: int
+    file_size_byte: int = Field(..., ge=0, description="ขนาดไฟล์ที่ update (หน่วยเป็น byte)")
 
 class UserPasswordUpdate(BaseModel):
     old_password: str

@@ -4,27 +4,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from db.models.account_type import AccountType
 from db.models.user import User
 
 
 async def get_user_by_username(db: AsyncSession, username: str) -> Optional[User]:
-    stmt = select(User).options(joinedload(User.file_size)).where(User.username == username)
+    stmt = select(User).where(User.username == username)
     res = await db.execute(stmt)
     return res.scalar_one_or_none()
 
 async def get_user_by_name(db: AsyncSession, name: str) -> Optional[User]:
-    stmt = select(User).options(joinedload(User.file_size)).where(User.name == name)
+    stmt = select(User).where(User.name == name)
     res = await db.execute(stmt)
     return res.scalar_one_or_none()
 
 async def get_user_by_id(db: AsyncSession, uid: int) -> Optional[User]:
     
     stmt = select(User).options(
-        joinedload(User.file_size),
-        
         joinedload(User.account_type_rel)
-        .joinedload(AccountType.file_size)
         ).where(User.users_id == uid)
     
     res = await db.execute(stmt)
@@ -36,3 +32,4 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> O
     if not user or not verify_password(password, user.hashed_password):
         return None
     return user
+

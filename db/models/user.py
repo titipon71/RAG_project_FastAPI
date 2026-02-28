@@ -25,3 +25,15 @@ class User(Base):
     channels = relationship("Channel", back_populates="creator")
     uploaded_files = relationship("File", back_populates="uploader")
     account_type_rel = relationship("AccountType", back_populates="users")
+    
+    def get_max_file_size(self) -> Optional[int]:
+        if self.file_size_custom is not None:
+            return self.file_size_custom
+
+        if (
+            self.account_type_rel
+            and self.account_type_rel.file_size_default is not None
+        ):
+            return self.account_type_rel.file_size_default
+
+        return None

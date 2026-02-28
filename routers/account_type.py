@@ -1,20 +1,18 @@
 from fastapi import APIRouter ,Depends, HTTPException
 from sqlalchemy import select
 from core import logging
-from db.models import account_type
 from db.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models.account_type import AccountType
 import traceback
 from schemas.account_types import AccountTypeResponse, AccountTypeUpdateSizeRequest
-from sqlalchemy.orm import joinedload
 
 router = APIRouter()
 
 @router.get("/account-types", tags=["Account Types"] , response_model=list[AccountTypeResponse])
 async def list_account_types(db: AsyncSession = Depends(get_db)):
     try:
-         stmt = select(AccountType).options(joinedload(AccountType.file_size))
+         stmt = select(AccountType)
          result = await db.execute(stmt)
          account_types = result.scalars().all()
          
@@ -24,7 +22,7 @@ async def list_account_types(db: AsyncSession = Depends(get_db)):
             response.append(AccountTypeResponse(
                 account_type_id=account_type.account_type_id,
                 type_name=account_type.type_name,
-                file_size=account_type.file_size.size 
+                file_size_byte=account_type.file_size_default
             ))
          return response
      
@@ -41,22 +39,22 @@ async def list_account_types(db: AsyncSession = Depends(get_db)):
 @router.put("/account-types", tags=["Account Types"], response_model=AccountTypeResponse)
 async def update_size_for_account_type(payload: AccountTypeUpdateSizeRequest, db: AsyncSession = Depends(get_db)):
     try:
-        stmt = select(AccountType).options(joinedload(AccountType.file_size)).where(AccountType.account_type_id == payload.account_type_id)
+        stmt = select(AccountType).where(AccountType.account_type_id == payload.account_type_id)
         result = await db.execute(stmt)
         account_type = result.scalar_one_or_none()
         
         if not account_type:
             raise HTTPException(status_code=404, detail="Account type not found")
         
-        # Update the file_size field
-        account_type.file_size.size = payload.file_size
+        # Update the file_size_default field
+        account_type.file_size_default = payload.file_size_byte
         await db.flush()
         await db.refresh(account_type)
         
         return AccountTypeResponse(
             account_type_id=account_type.account_type_id,
             type_name=account_type.type_name,
-            file_size=account_type.file_size.size
+            file_size_byte=account_type.file_size_default
         )
         
     except Exception as e:

@@ -102,7 +102,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 
-@router.patch("/users/file-size/", response_model=UserOut, tags=["Users"])
+@router.put("/users/file-size/", response_model=UserOut, tags=["Users"])
 async def update_user_file_size(
     payload: UserFileSizeUpdate,
     db: AsyncSession = Depends(get_db),
@@ -123,8 +123,9 @@ async def update_user_file_size(
                 detail="ไม่พบผู้ใช้งาน"
             )
 
-        user.file_size_custom = payload.file_size
         
+        user.file_size_custom = payload.file_size_byte
+        user.role = RoleUser.special
         await db.flush()
         await db.refresh(user)
 
@@ -141,12 +142,29 @@ async def update_user_file_size(
         raise
 
     except Exception:
-        await db.rollback()
         logger.exception("Unexpected server error")
         raise HTTPException(
             status_code=500,
             detail="Unexpected server error"
         )
+        
+@router.put('users/file-set-default/{user_id}', response_model=UserOut, tags=["Users"])
+async def set_user_file_size_default(
+    user_id: int = Path(..., gt=0),
+    db: AsyncSession = Depends(get_db),
+    # current_user: User = Depends(get_current_user),
+):
+    # if current_user.role != RoleUser.admin:
+    #     raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
+
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
+
+    user.file_size_custom = None
+    await db.flush()
+    await db.refresh(user)
+    return user
 
 @router.put("/users/password/{user_id}", status_code=204, tags=["Users"])
 async def update_user_password(
@@ -187,7 +205,6 @@ async def delete_user(
 async def update_user_role(
     user_id: int = Path(..., gt=0),
     new_role: RoleUser = Path(...),
-    secret_key: str = Body(..., embed=True),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -222,8 +239,7 @@ async def list_users(
 
         stmt = (
             select(User)
-            .options(joinedload(User.file_size), 
-                     joinedload(User.account_type_rel).joinedload(AccountType.file_size))
+            .options(joinedload(User.account_type_rel))
             .offset(skip)
             .limit(limit)
         )
@@ -240,10 +256,11 @@ async def list_users(
                 # แสดงชื่อประเภทบัญชี
                 account_type=user.account_type_rel.type_name if user.account_type_rel else None,
                 
-                # Logic การดึงค่า Size (MB)
-                file_size=(
-                    user.file_size.size if user.file_size  # ถ้ามีค่าเฉพาะบุคคล
-                    else (user.account_type_rel.file_size.size if user.account_type_rel and user.account_type_rel.file_size else None) # ถ้าไม่มี ให้ใช้ค่า Default
+                # Logic การดึงค่า Size (byte)
+                file_size_byte=(
+                    user.file_size_custom if user.file_size_custom is not None else (
+                        user.account_type_rel.file_size_default if user.account_type_rel else None
+                    )
                 ),
                 created_at=user.created_at,
             )
@@ -265,7 +282,14 @@ async def list_users(
 async def get_user_by_token(current_user: User = Depends(get_current_user)):
     try:
         acc_type = current_user.account_type_rel
-
+        
+        file_size = None
+        
+        if current_user.file_size_custom is not None:
+            file_size = current_user.file_size_custom
+        else:
+            file_size = acc_type.file_size_default if acc_type and acc_type.file_size_default else None
+        
         return {
             "users_id": current_user.users_id,
             "username": current_user.username,
@@ -274,20 +298,7 @@ async def get_user_by_token(current_user: User = Depends(get_current_user)):
 
             "account_type": acc_type.type_name if acc_type else None,
 
-            "file_size_id": (
-                current_user.file_size_default_id
-                or (acc_type.file_size_id if acc_type else None)
-            ),
-
-            "file_size": (
-                current_user.file_size.size
-                if current_user.file_size
-                else (
-                    acc_type.file_size.size
-                    if acc_type and acc_type.file_size
-                    else None
-                )
-            ),
+            "file_size": file_size
         }
 
     except Exception as e:

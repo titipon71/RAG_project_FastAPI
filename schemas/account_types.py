@@ -5,9 +5,9 @@ from schemas.base import ORMBase
 class AccountTypeResponse(ORMBase):
     account_type_id: int
     type_name: str
-    file_size: int
+    file_size_byte: int
     
 class AccountTypeUpdateSizeRequest(ORMBase):
     account_type_id: int
-    file_size: int
+    file_size_byte: int
     
