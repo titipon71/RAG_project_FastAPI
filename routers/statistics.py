@@ -118,11 +118,8 @@ async def number_of_active_users_per_day(
     month: int | None = Query(None, ge=1, le=12, description="เดือนที่ต้องการ (1-12)"),
     day: int | None = Query(None, ge=1, le=31, description="วันที่ต้องการ (1-31)"),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
 ):
-    if current_user.role != RoleUser.admin:
-        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
-
+    
     # Group by Date (ตัดเวลาทิ้ง เอาแค่วันที่)
     stmt = (
         select(
@@ -172,27 +169,28 @@ async def number_of_active_users_per_day(
 
     # Group by Date (ตัดเวลาทิ้ง เอาแค่วันที่)
     stmt = (
-        select(
-            cast(Chats.created_at, Date).label("date"), 
-            func.count(func.distinct(Chats.users_id)).label("active_users")
-        ).where(Chats.channels_id == channel_id)
+    select(
+        cast(User.active_at, Date).label("date"),
+        func.count(User.users_id).label("active_users")
     )
+    .where(User.active_at.is_not(None))
+)
     
     # --- Date Range Filter ---
     if start_date:
-        stmt = stmt.where(cast(Chats.created_at, Date) >= start_date)
+        stmt = stmt.where(cast(User.active_at, Date) >= start_date)
     if end_date:
-        stmt = stmt.where(cast(Chats.created_at, Date) <= end_date)
+        stmt = stmt.where(cast(User.active_at, Date) <= end_date)
     
     # --- Year / Month / Day Filter ---
     if year:
-        stmt = stmt.where(func.year(Chats.created_at) == year)
+        stmt = stmt.where(func.year(User.active_at) == year)
     if month:
-        stmt = stmt.where(func.month(Chats.created_at) == month)
+        stmt = stmt.where(func.month(User.active_at) == month)
     if day:
-        stmt = stmt.where(func.day(Chats.created_at) == day)
+        stmt = stmt.where(func.day(User.active_at) == day)
     
-    stmt = stmt.group_by(cast(Chats.created_at, Date)).order_by(cast(Chats.created_at, Date))
+    stmt = stmt.group_by(cast(User.active_at, Date)).order_by(cast(User.active_at, Date))
 
     result = await db.execute(stmt)
     data = result.all()

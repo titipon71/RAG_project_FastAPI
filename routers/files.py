@@ -162,7 +162,7 @@ async def upload_files_only(
 
             # 7) เติมเอกสารเข้า RAG (Chroma) --- จุดเสี่ยงสูง ---
             try:
-                print(f"DEBUG: กำลังส่งไฟล์ {frow.original_filename} ไปยัง RAG Engine...")
+                logger.info(f"DEBUG: กำลังส่งไฟล์ {frow.original_filename} ไปยัง RAG Engine...")
                 abs_path = UPLOAD_ROOT / rel_path
                 
                 # เช็คว่าไฟล์มีอยู่จริงไหม
@@ -179,10 +179,10 @@ async def upload_files_only(
                 # เติมเอกสารลงคอลเลกชันเดิม
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, rag_engine.add_documents, docs)
-                print("DEBUG: RAG Engine ทำงานสำเร็จ")
+                logger.info("DEBUG: RAG Engine ทำงานสำเร็จ")
 
             except Exception as rag_err:
-                print(f"WARNING: RAG Error (ข้ามไปก่อน): {rag_err}")
+                logger.warning(f"WARNING: RAG Error (ข้ามไปก่อน): {rag_err}")
                 # ไม่ raise error เพื่อให้ upload ผ่านไปได้แม้ RAG พัง
                 # แต่ print ให้เห็นใน log
 

@@ -4,7 +4,7 @@ from xmlrpc import client
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -148,6 +148,7 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
                     account_type=sso_data.get("profile", {}).get("account_type"),
                     hashed_password=username,  # แนะนำให้เปลี่ยนใน production
                     role=RoleUser.user,
+                    active_at=func.current_timestamp()
                 )
                 db.add(new_user)
                 await db.flush()
@@ -157,6 +158,7 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
                 user.name = sso_data.get("profile", {}).get("name_en")
                 user.email = sso_data.get("profile", {}).get("email")
                 user.account_type = sso_data.get("profile", {}).get("account_type")
+                user.active_at = func.current_timestamp()
                 await db.flush()
 
         except IntegrityError:
@@ -193,15 +195,3 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
             detail="Internal Server Error"
         )
         
-@router.post("/auth/kmutnb-sso/logout", tags=["Authentication"])
-async def sso_logout():
-    async with httpx.AsyncClient() as client:
-        try:
-            await client.post(
-                "https://sso.kmutnb.ac.th/site/logout")
-            
-        except httpx.RequestError as e:
-            logger.error(f"SSO Logout Request Error: {e}", exc_info=True)
-            raise HTTPException(status_code=502, detail="ไม่สามารถเชื่อมต่อ SSO Server ได้")
-    # ในการ logout จริงๆ อาจต้องทำ token revocation กับ SSO provider ด้วย
-    return {"message": "SSO logout successful"}

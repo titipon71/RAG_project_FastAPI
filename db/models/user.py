@@ -20,6 +20,7 @@ class User(Base):
     account_type_id: Mapped[int] = mapped_column("account_type_id", MyInt(unsigned=True), ForeignKey("account_type.account_type_id"), nullable=True)
     role: Mapped[RoleUser] = mapped_column("role", MyEnum(RoleUser), nullable=False, server_default=text("'user'"))
     file_size_custom: Mapped[Optional[int]] = mapped_column("file_size_custom", MyInt(unsigned=True), nullable=True)
+    active_at: Mapped[datetime] = mapped_column("active_at", server_default=func.current_timestamp(), onupdate=func.current_timestamp(), nullable=False)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
     channels = relationship("Channel", back_populates="creator")

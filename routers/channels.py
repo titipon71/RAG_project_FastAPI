@@ -6,6 +6,7 @@ import shutil
 from datetime import datetime, timezone
 import traceback
 from typing import List, Optional
+from unittest import result
 
 import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Path
@@ -47,7 +48,7 @@ UPLOAD_ROOT = settings.upload_root
 # ============================================================
 
 # ตรวจไฟล์ (optional)
-MAX_SIZE_PER_FILE = 50 * 1024 * 1024  # 50 MB
+MAX_SIZE_PER_FILE = 1 * 1024 * 1024 * 1024  # 1 GB
 ALLOW_MIME = {"application/pdf",
               "text/plain"}
 
@@ -129,7 +130,7 @@ async def get_channel_details(
             .where(Channel.channels_id == decoded_channel_id)
         )
         result = await db.execute(stmt)
-        channel = result.scalar_one_or_none()
+        channel = result.scalars().unique().one_or_none()        
         if channel is None:
             raise HTTPException(status_code=404, detail="ไม่พบช่อง Channel")
         
@@ -158,13 +159,16 @@ async def get_channel_details(
                 "original_filename": f.original_filename,
                 "size_bytes": f.size_bytes,
                 "created_at": f.created_at,
+                "mime": sniff_mime(UPLOAD_ROOT / f.storage_uri),
+                "channel_id": f.channel_id
             }
 
             if channel.status == RoleChannel.public:
                 item["public_url"] = f"/static/uploads/{f.storage_uri}"
+            else:
+                item["public_url"] = "None (เฉพาะช่องทางสาธารณะเท่านั้นที่เข้าถึงไฟล์ผ่าน URL ได้)"
 
             file_list.append(item)
-        
         return {
             "channels_id": channel.channels_id,
             "title": channel.title,
@@ -178,6 +182,7 @@ async def get_channel_details(
     except HTTPException:
         raise
     except Exception as e:
+        traceback.print_exc()
         error_traceback = traceback.format_exc()
         logger.error(f"Error in get_channel_details: {str(e)}\n{error_traceback}")
         raise HTTPException(

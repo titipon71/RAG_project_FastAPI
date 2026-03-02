@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-
+from core.enums import RoleChannel
 from pydantic import BaseModel, Field
 
 
@@ -26,5 +26,6 @@ class ApiKeyListResponse(BaseModel):
     name: str
     channel_id: Optional[str] = None
     channel_name: Optional[str] = None
+    channel_status: RoleChannel
     key_hint: str
     created_at: datetime

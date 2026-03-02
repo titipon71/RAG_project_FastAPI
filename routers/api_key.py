@@ -150,6 +150,7 @@ async def list_api_keys(
                 name=key.name,
                 channel_id=encode_id(key.channel.channels_id) if key.channel else None,
                 channel_name=key.channel.title if key.channel else "N/A",
+                channel_status=key.channel.status if key.channel else None,
                 key_hint=key.key_hash if key.key_hash else "N/A",
                 created_at=key.created_at or datetime.now()
             ))

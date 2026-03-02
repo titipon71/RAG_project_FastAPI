@@ -125,7 +125,10 @@ async def update_user_file_size(
 
         
         user.file_size_custom = payload.file_size_byte
-        user.role = RoleUser.special
+        
+        if user.role != RoleUser.admin:
+            user.role = RoleUser.special
+            
         await db.flush()
         await db.refresh(user)
 
@@ -214,9 +217,14 @@ async def update_user_role(
     user = await get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
-
+    
+    if user.role == RoleUser.special and new_role == RoleUser.user:
+       user.file_size_custom = None 
+    
+        
     logger.info(f"Admin {current_user.users_id} changed user {user_id} role to {new_role}")
     user.role = new_role
+    
     await db.flush()
     await db.refresh(user)
 
