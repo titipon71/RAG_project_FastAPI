@@ -92,6 +92,7 @@ class ChannelUpdateStatus(ORMBase):
     
 class ChannelFileSizeBalanceResponse(ORMBase):
     channel_id: str
-    file_size_balance_bytes: Optional[int] = None
-    total_size_bytes: int = 0
+    remaining_storage_bytes: Optional[int] = None
+    used_storage_bytes: int = 0
+    storage_limit_bytes: Optional[int] = None
     
