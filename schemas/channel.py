@@ -89,3 +89,9 @@ class ChannelUpdateStatus(ORMBase):
     def encode_channel_id(cls, v):
         if isinstance(v, int): return encode_id(v)
         return v
+    
+class ChannelFileSizeBalanceResponse(ORMBase):
+    channel_id: str
+    file_size_balance_bytes: Optional[int] = None
+    total_size_bytes: int = 0
+    

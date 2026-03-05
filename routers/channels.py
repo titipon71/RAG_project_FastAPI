@@ -23,14 +23,14 @@ from core.hashids import encode_id, decode_id
 from core.security import get_current_user
 from db.models.account_type import AccountType
 from db.session import get_db
-from db.models.user import User
+from db.models.user import User , get_max_file_size
 from db.models.channel import Channel
 from db.models.file import File
 from db.models.event import ChannelStatusEvent
 from schemas.channel import (
     ChannelCreate, ChannelResponse, ChannelOut, ChannelUpdate,
     ChannelUpdateResponse, ChannelOneResponse, ChannelListPendingItem,
-    ChannelListPublicItem, ChannelListAllItem, ChannelUpdateStatus,
+    ChannelListPublicItem, ChannelListAllItem, ChannelUpdateStatus, ChannelFileSizeBalanceResponse
 )
 from schemas.file import FileDetail
 from schemas.moderation import ModerationResponse, AdminDecisionIn, AdminDecisionOut
@@ -926,3 +926,39 @@ async def list_all_channels(
             status_code=500, 
             detail=f"Internal Error: {str(e)}" # หรือส่ง error_traceback ถ้าอยากเห็นบน Postman
         )
+
+@router.get('/channel/file-size/balance/{channel_id}', response_model=ChannelFileSizeBalanceResponse, tags=["Channels"])
+async def get_channel_file_size_balance(
+    channel_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    decoded_id = decode_id(channel_id)
+    
+    stmt = (
+        select(Channel)
+        .options(
+            selectinload(Channel.creator)
+            .selectinload(User.account_type_rel)
+        )
+        .where(Channel.channels_id == decoded_id)
+    )
+    result = await db.execute(stmt)
+    channel = result.scalar_one_or_none()
+
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    sum_stmt = select(func.sum(File.size_bytes)).where(File.channel_id == decoded_id)
+    sum_result = await db.execute(sum_stmt)
+    total_size = sum_result.scalar() or 0
+
+    max_file_size = channel.creator.get_max_file_size()
+    
+    file_size_balance = (max_file_size - total_size) if max_file_size is not None else None
+    
+    return ChannelFileSizeBalanceResponse(
+        channel_id=channel_id,
+        file_size_balance_bytes=file_size_balance,
+        total_size_bytes=total_size
+    )
+    
