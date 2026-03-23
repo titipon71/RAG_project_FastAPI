@@ -8,7 +8,7 @@ from typing import List, Tuple
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
 from core.enums import RoleChannel, RoleUser
 from core.hashids import encode_id, decode_id
@@ -148,7 +148,7 @@ async def list_api_keys(
             response.append(ApiKeyListResponse(
                 key_id=key.key_id,
                 name=key.name,
-                channel_id=encode_id(key.channel.channels_id) if key.channel else None,
+                channel_id=encode_id(key.channel_id) if key.channel_id else None,
                 channel_name=key.channel.title if key.channel else "N/A",
                 channel_status=key.channel.status if key.channel else None,
                 key_hint=key.key_hash if key.key_hash else "N/A",
@@ -164,7 +164,65 @@ async def list_api_keys(
             status_code=500,
             detail="Failed to fetch API keys"
         )
+        
+@router.post('/api-key/refresh', tags=["Public API"], response_model=ApiKeyResponse)
+async def refresh_api_key(
+    payload: ApiKeyRevoke,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        # หา key ใน DB
+        stmt = select(ApiKey).where(
+            ApiKey.key_id == payload.key_id,
+            ApiKey.user_id == current_user.users_id
+        )
 
+        result = await db.execute(stmt)
+        api_key = result.scalar_one_or_none()
+
+        if not api_key:
+            raise HTTPException(status_code=404, detail="API Key not found")
+
+        try:
+            # สร้าง key ใหม่
+            new_raw_key = "sk-" + secrets.token_urlsafe(32)
+
+            api_key.key_hash = new_raw_key
+
+            await db.flush()
+            await db.refresh(api_key)
+
+        except Exception as db_error:
+            logger.error(
+                f"DB error refreshing API Key | user_id={current_user.users_id} | error={str(db_error)}",
+                exc_info=True
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Database error while refreshing API key"
+            )
+
+        return ApiKeyResponse(
+            key_id=api_key.key_id,
+            name=api_key.name,
+            channel_id=encode_id(api_key.channel_id) if api_key.channel_id else None,
+            key_secret=new_raw_key,
+            created_at=api_key.created_at or datetime.now()
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(
+            f"Unexpected error refreshing API Key | user_id={current_user.users_id} | error={str(e)}",
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Internal Server Error"
+        )
 
 
 @router.post("/api/v1/chat/completions", tags=["Public API"])

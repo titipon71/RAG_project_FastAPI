@@ -80,7 +80,7 @@ class AppConfig:
     # Models
     EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3:1.7b")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "ministral-3:3b")
     
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")

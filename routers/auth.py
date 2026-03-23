@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.enums import RoleUser, SSOLoginType
 from core.security import create_access_token
+from db.models.account_type import AccountType
 from db.session import get_db
 from db.models.user import User
 from schemas.auth import SSOCodeRequest
@@ -155,9 +156,19 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
                 await db.refresh(new_user)
                 user = new_user
             else:
-                user.name = sso_data.get("profile", {}).get("name_en")
-                user.email = sso_data.get("profile", {}).get("email")
-                user.account_type = sso_data.get("profile", {}).get("account_type")
+                if user.role == RoleUser.admin:
+                    account_type_name = RoleUser.admin.upper()
+                else:
+                    account_type_name = sso_data.get("profile", {}).get("account_type")
+
+                if account_type_name:
+                    stmt = select(AccountType).where(AccountType.type_name == account_type_name)
+                    result = await db.execute(stmt)
+                    account_type = result.scalar_one_or_none()
+
+                    if account_type:
+                        user.account_type_rel = account_type
+                
                 user.active_at = func.current_timestamp()
                 await db.flush()
 
@@ -177,7 +188,7 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
             "user_id": user.users_id,
             "username": user.username,
             "name": user.name,
-            "account_type": user.account_type,
+            "account_type": user.account_type_rel.type_name if user.account_type_rel else None,
             "local_access_token": create_access_token(
                 data={"sub": str(user.users_id)}
             ),

@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import Field
 from schemas.base import ORMBase
 
@@ -5,7 +7,7 @@ from schemas.base import ORMBase
 class AccountTypeResponse(ORMBase):
     account_type_id: int
     type_name: str
-    file_size_byte: int
+    file_size_byte: Optional[int]
     
 class AccountTypeUpdateSizeRequest(ORMBase):
     account_type_id: int
