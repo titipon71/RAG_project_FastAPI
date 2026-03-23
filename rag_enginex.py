@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 from rich.logging import RichHandler
 from rich.console import Console
 from rich.theme import Theme
-from rich.logging import RichHandler
 
 # --- LlamaIndex Core ---
 from llama_index.core import (
@@ -20,20 +19,29 @@ from llama_index.core import (
 )
 from llama_index.core.node_parser import SemanticSplitterNodeParser
 from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
-from llama_index.core.schema import NodeWithScore
+from llama_index.core.schema import NodeWithScore, TextNode
 from llama_index.storage.chat_store.redis import RedisChatStore
 
 from llama_index.core.memory import ChatMemoryBuffer
 # --- Integrations ---
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
-from llama_index.vector_stores.chroma import ChromaVectorStore
-import chromadb
-from chromadb.config import Settings as ChromaSettings
+from llama_index.vector_stores.lancedb import LanceDBVectorStore 
+import lancedb                                                      
 
 from llama_index.core.callbacks.base_handler import BaseCallbackHandler
 from llama_index.core.callbacks.schema import CBEventType, EventPayload
 from llama_index.core.callbacks import CallbackManager
+
+from concurrent.futures import ThreadPoolExecutor
+
+from llama_index.retrievers.bm25 import BM25Retriever
+from llama_index.core.retrievers import QueryFusionRetriever
+from llama_index.core.chat_engine import CondensePlusContextChatEngine
+
+from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
+
+from threading import RLock
 # ==========================================
 # 0. Logging Setup (Custom Colors)
 # ==========================================
@@ -74,8 +82,8 @@ load_dotenv()
 class AppConfig:
     # Paths
     DATA_DIR: str = os.getenv("RAG_DATA_DIR", "uploads")
-    CHROMA_DIR: str = os.getenv("CHROMA_DIR", "./chroma_db")
-    COLLECTION_NAME: str = "quickstart2"
+    LANCEDB_DIR: str = os.getenv("LANCEDB_DIR", "./lancedb")     
+    TABLE_NAME: str = "quickstart2"                                   
     
     # Models
     EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
@@ -99,6 +107,8 @@ class AppConfig:
         "อย่าคิดเสียงดังหรืออธิบายกระบวนการคิดของคุณ."
         "เอาความรู้มาจากเอกสารที่มีเท่านั้น ถ้าไม่มีในเอกสารให้บอกว่า 'ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่มีอยู่ 😔' "
     )
+    
+    MAX_CACHE_NODES: int = int(os.getenv("MAX_CACHE_NODES", "100000"))
 
 config = AppConfig()
 
@@ -140,58 +150,106 @@ class OllamaTokenHandler(BaseCallbackHandler):
 class RAGService:
     def __init__(self):
         self.chat_engines = {}
+        self.nodes_cache: Dict[str, TextNode] = {}
+        self.engine_lock = RLock()
         
-        # ใส่สี [bold cyan] เพื่อความสวยงาม
         logger.info("[bold cyan]🚀 Initializing RAG Service...[/]")
         self._ensure_directories()
-        
+
         self.token_handler = OllamaTokenHandler()
         LlamaSettings.callback_manager = CallbackManager([self.token_handler])
-        
-        # 1. Init Models (Heavy Load)
-        logger.info(f"Loading Embedding Model: [yellow]{config.EMBED_MODEL_NAME}[/]")
-        self.embed_model = self._init_embed_model()
-        
-        logger.info("Initializing Node Parser...")
-        self.node_parser = self._init_node_parser()
-        
-        logger.info(f"Connecting to Ollama: [yellow]{config.OLLAMA_MODEL}[/]")
-        self.llm = self._init_llm()
-        
-        # 2. Init Database & Storage
-        logger.info("Connecting to [bright_blue]ChromaDB...[/]")
-        self.chroma_collection = self._init_chroma()
-        self.vector_store = ChromaVectorStore(chroma_collection=self.chroma_collection)
+
+        # โหลด EmbedModel และ LLM พร้อมกัน แล้วค่อยสร้าง NodeParser
+        logger.info("Loading models in parallel...")
+        self._init_models_parallel_sync()
+
+        # ส่วนที่เหลือเหมือนเดิม
+        logger.info("Connecting to [bright_blue]LanceDB...[/]")
+        self.lance_db, self.vector_store = self._init_lancedb()
         self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
-        
-        # 3. Load Index
+
         logger.info("Loading/Creating Vector Index...")
         self.index = self._load_or_create_index()
 
         logger.info(f"Initializing Redis Chat Store at [italic hot_pink]{config.REDIS_URL}[/]...")
         try:
             self.chat_store = RedisChatStore(redis_url=config.REDIS_URL)
-            # ตรวจสอบว่า Redis ต่อติดจริงไหม
             if self.chat_store._redis_client.ping():
                 logger.info("[bold green]✅ Connected to Redis Chat Store successfully.[/]")
             else:
-                logger.warning("[bold yellow]⚠️ Failed to connected Redis Chat Store.[/]")
+                logger.warning("[bold yellow]⚠️ Failed to connect Redis Chat Store.[/]")
         except Exception as e:
             logger.error(f"[bold red]❌ Failed to connect to Redis:[/]\n{e}")
-            # Fallback or raise error depending on requirement
             raise e
-                
+
         logger.info("[bold green]✅ RAG Service Ready![/]")
+
+    def _add_nodes_to_cache(self, nodes):
+
+        if not nodes:
+            return
+
+        with self.nodes_lock:
+
+            for node in nodes:
+
+                node_id = node.node_id or node.id_
+
+                if not node_id:
+                    continue
+
+                self.nodes_cache[node_id] = node
+
+            # enforce size limit
+            if len(self.nodes_cache) > config.MAX_CACHE_NODES:
+
+                overflow = len(self.nodes_cache) - config.MAX_CACHE_NODES
+
+                # remove oldest
+                keys_to_remove = list(self.nodes_cache.keys())[:overflow]
+
+                for k in keys_to_remove:
+                    del self.nodes_cache[k]
+
+            logger.info(
+                f"nodes_cache size: {len(self.nodes_cache)}"
+            )
+    
+    def _init_models_parallel_sync(self):
+        logger.info(
+            f"Loading in parallel — "
+            f"EmbedModel: [yellow]{config.EMBED_MODEL_NAME}[/]  |  "
+            f"LLM: [yellow]{config.OLLAMA_MODEL}[/]  |  "
+            f"Reranker: [yellow]bge-reranker-v2-m3[/]"
+        )
+
+        with ThreadPoolExecutor(max_workers=3) as pool:  # เพิ่มเป็น 3
+            embed_future    = pool.submit(self._init_embed_model)
+            llm_future      = pool.submit(self._init_llm)
+            reranker_future = pool.submit(self._init_reranker)  # ← เพิ่ม
+
+            self.embed_model = embed_future.result()
+            self.llm         = llm_future.result()
+            self.reranker    = reranker_future.result()         # ← เพิ่ม
+
+        logger.info("Initializing Node Parser...")
+        self.node_parser = self._init_node_parser()
         
     def _ensure_directories(self):
         os.makedirs(config.DATA_DIR, exist_ok=True)
-        os.makedirs(config.CHROMA_DIR, exist_ok=True)
+        os.makedirs(config.LANCEDB_DIR, exist_ok=True) 
 
     def _init_embed_model(self) -> HuggingFaceEmbedding:
         return HuggingFaceEmbedding(
             model_name=config.EMBED_MODEL_NAME,
             device="cuda", # เปลี่ยนเป็น "cpu" ได้ถ้าเครื่องไม่มีการ์ดจอ
             trust_remote_code=True
+        )
+    
+    def _init_reranker(self) -> FlagEmbeddingReranker:
+        return FlagEmbeddingReranker(
+            model="BAAI/bge-reranker-v2-m3",  # รองรับภาษาไทยได้ดี
+            top_n=config.TOP_K,               # เหลือ TOP_K หลัง rerank
         )
 
     def _init_node_parser(self) -> SemanticSplitterNodeParser:
@@ -209,30 +267,35 @@ class RAGService:
             context_window=config.CONTEXT_WINDOW,
             num_output=config.NUM_OUTPUT,
             system_prompt=config.SAFETY_SYSTEM_PROMPT,
-            # temperature=0.3,
-            # additional_kwargs={
-            #         "top_p": 0.8,
-            # },
         )
 
-    def _init_chroma(self):
-        client = chromadb.PersistentClient(
-            path=config.CHROMA_DIR,
-            settings=ChromaSettings(anonymized_telemetry=False),
+    def _init_lancedb(self):
+        """เชื่อมต่อ LanceDB และสร้าง/โหลด Table"""
+        db = lancedb.connect(config.LANCEDB_DIR)
+        vector_store = LanceDBVectorStore(
+            uri=config.LANCEDB_DIR,
+            table_name=config.TABLE_NAME,
         )
-        return client.get_or_create_collection(config.COLLECTION_NAME)
+        return db, vector_store
 
     def _load_or_create_index(self) -> VectorStoreIndex:
         try:
-            # พยายามโหลดจาก DB เดิมก่อน (เร็ว)
-            return VectorStoreIndex.from_vector_store(
-                self.vector_store,
-                embed_model=self.embed_model,
-            )
+            existing_tables = self.lance_db.table_names()
+            if config.TABLE_NAME in existing_tables:
+                logger.info(f"Found existing LanceDB table: [green]{config.TABLE_NAME}[/]")
+                index = VectorStoreIndex.from_vector_store(
+                    self.vector_store,
+                    embed_model=self.embed_model,
+                )
+                # โหลด nodes เข้า cache หลัง index พร้อม
+                self._load_nodes_cache_from_lancedb()
+                return index
+            else:
+                raise ValueError(f"Table '{config.TABLE_NAME}' not found, will create new index.")
         except Exception as e:
             logger.warning(f"Could not load index from vector store: {e}")
             logger.info("Creating new index from documents in DATA_DIR...")
-            
+
             documents = []
             try:
                 documents = SimpleDirectoryReader(config.DATA_DIR).load_data()
@@ -243,12 +306,49 @@ class RAGService:
                 logger.warning("No documents found to initialize.")
 
             nodes = self.node_parser.get_nodes_from_documents(documents) if documents else []
-            
+
+            # เก็บลง cache ด้วยถ้ามี nodes
+            if nodes:
+                self._add_nodes_to_cache(nodes)
+
             return VectorStoreIndex(
                 nodes,
                 storage_context=self.storage_context,
                 embed_model=self.embed_model
             )
+    
+    def _load_nodes_cache_from_lancedb(self):
+        """โหลด nodes จาก LanceDB เข้า nodes_cache สำหรับ BM25"""
+        try:
+            table = self.lance_db.open_table(config.TABLE_NAME)
+            rows = table.to_pandas()
+
+            if rows.empty:
+                logger.info("LanceDB table is empty, nodes_cache will be empty.")
+                return
+
+            from llama_index.core.schema import TextNode
+
+            for _, row in rows.iterrows():
+                metadata = row.get("metadata", {})
+                # LanceDB เก็บ metadata เป็น dict อยู่แล้ว
+                if isinstance(metadata, str):
+                    import json
+                    metadata = json.loads(metadata)
+
+                node = TextNode(
+                    text=row.get("text", ""),
+                    metadata=metadata,
+                    id_=row.get("id", None),
+                )
+                self._add_nodes_to_cache([node])
+
+            logger.info(f"Loaded [bold green]{len(self.nodes_cache)}[/] nodes into BM25 cache from LanceDB.")
+
+        except Exception as e:
+            logger.warning(f"[yellow]Could not load nodes cache from LanceDB: {e}[/]")
+            logger.warning("[yellow]BM25 will start empty and fill up as documents are added.[/]")
+            # ไม่ raise — fallback gracefully ให้ BM25 เริ่มว่างได้
 
     def _strip_think(self, text: str) -> str:
         """ลบข้อความส่วนที่ AI คิด (Chain of Thought) ออก"""
@@ -259,72 +359,126 @@ class RAGService:
         return text.strip()
 
     def _get_chat_engine(self, channel_id: str, session_id: Union[str, int, None]):
-        # 1. สร้าง Key สำหรับอ้างอิง (รวม channel_id และ session_id)
         user_key = str(session_id) if session_id else "global_guest"
         engine_key = f"{channel_id}_{user_key}"
         
-        # 2. ถ้ามี Engine นี้อยู่แล้ว ให้คืนค่ากลับไปเลย (Reuse)
-        if engine_key in self.chat_engines:
-            return self.chat_engines[engine_key]
-            
-        # 3. ถ้ายังไม่มี ให้สร้างใหม่
+        with self.engine_lock:
+            if engine_key in self.chat_engines:
+                return self.chat_engines[engine_key]
+
         logger.info(f"Creating new ChatEngine for key: {engine_key}")
-        
+
         filters = MetadataFilters(
             filters=[ExactMatchFilter(key="channel_id", value=str(channel_id))]
         )
-        
+
+        # --- Vector retriever ---
+        vector_retriever = self.index.as_retriever(
+            similarity_top_k=config.TOP_K * 2,  # ดึงเผื่อไว้ก่อน fusion จะเหลือ TOP_K
+            filters=filters,
+        )
+
+        # --- BM25 retriever (filter เฉพาะ nodes ของ channel นี้) ---
+        with self.nodes_lock:
+
+            channel_nodes = [
+                n
+                for n in self.nodes_cache.values()
+                if str(n.metadata.get("channel_id", "")) == str(channel_id)
+            ]
+
+        if channel_nodes:
+            bm25_retriever = BM25Retriever.from_defaults(
+                nodes=channel_nodes,
+                similarity_top_k=config.TOP_K * 2,
+            )
+            retrievers = [vector_retriever, bm25_retriever]
+            logger.info(f"Using hybrid retriever ({len(channel_nodes)} nodes in BM25)")
+        else:
+            # ยังไม่มี nodes ใน cache → fallback ใช้ vector อย่างเดียว
+            retrievers = [vector_retriever]
+            logger.info("No nodes in cache yet, using vector-only retriever")
+
+        # --- Fusion (RRF merge) ---
+        hybrid_retriever = QueryFusionRetriever(
+            retrievers=retrievers,
+            similarity_top_k=config.TOP_K,
+            num_queries=1,            # ไม่ generate query เพิ่ม ใช้คำถามเดิม
+            mode="reciprocal_rerank", # RRF
+            use_async=True,
+        )
+
         memory = ChatMemoryBuffer.from_defaults(
             token_limit=3000,
             chat_store=self.chat_store,
             chat_store_key=user_key
         )
-        
-        # สร้าง Engine
-        new_engine = self.index.as_chat_engine(
-            chat_mode="context",
+
+        new_engine = CondensePlusContextChatEngine.from_defaults(
+            retriever=hybrid_retriever,
             memory=memory,
-            similarity_top_k=config.TOP_K,
-            filters=filters,
             llm=self.llm,
-            response_mode="compact",
+            node_postprocessors=[self.reranker],
+            system_prompt=config.SAFETY_SYSTEM_PROMPT,
         )
-        
-        # 4. เก็บลง Cache แล้วคืนค่า
+
         self.chat_engines[engine_key] = new_engine
         return new_engine
     
     # --- Public Methods ---
 
     def add_documents(self, docs: List[Document]):
-        """เพิ่มเอกสารใหม่ลงใน Index เดิม"""
         if not docs:
             return
-            
+
         logger.info(f"Adding [bold]{len(docs)}[/] documents...")
         for d in docs:
             d.metadata = d.metadata or {}
-        
-        # แปลงเป็น Nodes
+
         nodes = self.node_parser.get_nodes_from_documents(docs)
-        
-        # Insert ลง Index (สำคัญ: ต้องใช้ insert_nodes ไม่ใช่สร้าง VectorStoreIndex ใหม่)
         self.index.insert_nodes(nodes)
-        
-        # Persist ลง Storage (ปกติ ChromaVectorStore จะ Auto-persist แต่เรียกไว้เพื่อความชัวร์ในบาง version)
-        self.index.storage_context.persist()
+        self._add_nodes_to_cache(nodes)
+
+        # ← clear เพื่อให้ engine ถัดไปสร้าง BM25 ใหม่จาก nodes ที่อัปเดตแล้ว
+        with self.engine_lock:
+            self.chat_engines.clear()
+            
         logger.info(f"Successfully added [bold green]{len(nodes)}[/] nodes to index.")
 
     def delete_documents_by_metadata(self, metadata: Dict[str, Any]):
-        where = {k: str(v) for k, v in metadata.items()}
-        logger.info(f"Deleting documents where: [yellow]{where}[/]")
-        self.chroma_collection.delete(where=where)
+        where_clauses = [f"{k} = '{v}'" for k, v in metadata.items()]
+        where_str = " AND ".join(where_clauses)
+        logger.info(f"Deleting documents where: [yellow]{where_str}[/]")
+
+        try:
+            table = self.lance_db.open_table(config.TABLE_NAME)
+            table.delete(where_str)
+
+            # ← sync nodes_cache ด้วย
+            before = len(self.nodes_cache)
+            self.nodes_cache = [
+                n for n in self.nodes_cache
+                if not all(
+                    str(n.metadata.get(k, "")) == str(v)
+                    for k, v in metadata.items()
+                )
+            ]
+            removed = before - len(self.nodes_cache)
+            logger.info(f"[bold green]✅ Delete successful. Removed {removed} nodes from cache.[/]")
+
+            # chat_engines ที่ build ไปแล้วอาจใช้ BM25 เก่า → clear cache
+            with self.engine_lock:
+                self.chat_engines.clear()
+                
+            logger.info("Chat engine cache cleared after document deletion.")
+
+        except Exception as e:
+            logger.error(f"[bold red]❌ Failed to delete documents:[/]\n{e}")
 
     def delete_documents_by_file_id(self, files_id: Union[str, int]):
         self.delete_documents_by_metadata({"files_id": str(files_id)})
 
     def clear_session_history(self, sessions_id: Union[str, int]):
-
         if not sessions_id:
             logger.warning("⚠️ No session_id provided to clear history.")
             return
@@ -347,15 +501,11 @@ class RAGService:
 
             response = await chat_engine.achat(question)
             
-            # 1. ดึงข้อความคำตอบ
             answer_text = self._strip_think(str(response))
-
-            # 2. ดึงจำนวน Token (Ollama ส่งมาใน raw)
             token_usage = self.token_handler.latest_usage
             
             if not response.source_nodes:
                 logger.info("[yellow]No source nodes found.[/]")
-                # กรณีไม่เจอเอกสาร ก็ return usage เป็น 0 หรือค่าเท่าที่มี
                 return {
                     "answer": "ตอนนี้ยังไม่มีเอกสารที่ใช้ตอบได้เลยนะ🤔 รบกวนเพิ่มเอกสารก่อนนะคะ😊",
                     "usage": token_usage,
@@ -370,34 +520,34 @@ class RAGService:
             if file_names:
                 logger.info(f"Sources used: [green]{file_names}[/]")
 
-            # ส่งกลับเป็น Dictionary แทน String
             return {
                 "answer": answer_text,
                 "usage": token_usage,
                 "sources": list(file_names)
-                
             }
             
     def debug_list_docs_by_channel(self, channel_id: int):
-        res = self.chroma_collection.get(where={"channel_id": str(channel_id)})
+        """แสดงรายการเอกสารใน LanceDB สำหรับ channel ที่กำหนด"""
+        try:
+            table = self.lance_db.open_table(config.TABLE_NAME)
+            # LanceDB ใช้ SQL filter แทน where dict ของ ChromaDB
+            results = table.search().where(f"channel_id = '{channel_id}'").to_list()
+            
+            print(f"[DEBUG] LanceDB docs for channel {channel_id}")
+            print(f"  total_docs: {len(results)}")
 
-        ids = res.get("ids", [])
-        metadatas = res.get("metadatas", [])
+            summary = {}
+            for row in results:
+                metadata = row.get("metadata", {})
+                file = metadata.get("file_name", "unknown")
+                page = metadata.get("page_label", "?")
+                summary.setdefault(file, set()).add(page)
 
-        print(f"[DEBUG] chroma docs for channel {channel_id}")
-        print(f"  total_docs: {len(ids)}")
-
-        summary = {}
-        for m in metadatas:
-            file = m.get("file_name", "unknown")
-            page = m.get("page_label", "?")
-
-            summary.setdefault(file, set()).add(page)
-
-        for file, pages in summary.items():
-            pages = sorted(pages)
-            print(f"  - {file}: pages={pages}")
-
+            for file, pages in summary.items():
+                pages = sorted(pages)
+                print(f"  - {file}: pages={pages}")
+        except Exception as e:
+            logger.error(f"[bold red]❌ debug_list_docs_by_channel failed:[/]\n{e}")
 
 
 # ==========================================
