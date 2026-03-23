@@ -42,6 +42,8 @@ from llama_index.core.chat_engine import CondensePlusContextChatEngine
 from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
 
 from threading import RLock
+
+import torch
 # ==========================================
 # 0. Logging Setup (Custom Colors)
 # ==========================================
@@ -152,6 +154,7 @@ class RAGService:
         self.chat_engines = {}
         self.nodes_cache: Dict[str, TextNode] = {}
         self.engine_lock = RLock()
+        self.nodes_lock = RLock()
         
         logger.info("[bold cyan]🚀 Initializing RAG Service...[/]")
         self._ensure_directories()
@@ -242,7 +245,7 @@ class RAGService:
     def _init_embed_model(self) -> HuggingFaceEmbedding:
         return HuggingFaceEmbedding(
             model_name=config.EMBED_MODEL_NAME,
-            device="cuda", # เปลี่ยนเป็น "cpu" ได้ถ้าเครื่องไม่มีการ์ดจอ
+            device = "cuda" if torch.cuda.is_available() else "cpu" , # เปลี่ยนเป็น "cpu" ได้ถ้าเครื่องไม่มีการ์ดจอ
             trust_remote_code=True
         )
     
@@ -321,7 +324,12 @@ class RAGService:
         """โหลด nodes จาก LanceDB เข้า nodes_cache สำหรับ BM25"""
         try:
             table = self.lance_db.open_table(config.TABLE_NAME)
-            rows = table.to_pandas()
+            rows = (
+                    table
+                    .search()
+                    .limit(config.MAX_CACHE_NODES)
+                    .to_pandas()
+                )
 
             if rows.empty:
                 logger.info("LanceDB table is empty, nodes_cache will be empty.")
@@ -422,7 +430,12 @@ class RAGService:
             system_prompt=config.SAFETY_SYSTEM_PROMPT,
         )
 
-        self.chat_engines[engine_key] = new_engine
+        with self.engine_lock:
+            existing_engine = self.chat_engines.get(engine_key)
+            if existing_engine is not None:
+                return existing_engine
+            self.chat_engines[engine_key] = new_engine
+
         return new_engine
     
     # --- Public Methods ---
@@ -455,15 +468,23 @@ class RAGService:
             table.delete(where_str)
 
             # ← sync nodes_cache ด้วย
-            before = len(self.nodes_cache)
-            self.nodes_cache = [
-                n for n in self.nodes_cache
-                if not all(
-                    str(n.metadata.get(k, "")) == str(v)
-                    for k, v in metadata.items()
-                )
-            ]
-            removed = before - len(self.nodes_cache)
+            with self.nodes_lock:
+
+                before = len(self.nodes_cache)
+
+                keys_to_delete = [
+                    node_id
+                    for node_id, node in self.nodes_cache.items()
+                    if all(
+                        str(node.metadata.get(k, "")) == str(v)
+                        for k, v in metadata.items()
+                    )
+                ]
+
+                for k in keys_to_delete:
+                    del self.nodes_cache[k]
+
+                removed = before - len(self.nodes_cache)
             logger.info(f"[bold green]✅ Delete successful. Removed {removed} nodes from cache.[/]")
 
             # chat_engines ที่ build ไปแล้วอาจใช้ BM25 เก่า → clear cache
