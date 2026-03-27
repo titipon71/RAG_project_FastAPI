@@ -24,3 +24,8 @@ class SSOLoginType(str, enum.Enum):
     vercel = "vercel"
     local = "local"
     local2 = "local2"
+    
+class OCRTool(str, enum.Enum):
+    easyocr = "easyocr"
+    paddleocr = "paddleocr-vl"
+    lightonocr = "lightonocr"

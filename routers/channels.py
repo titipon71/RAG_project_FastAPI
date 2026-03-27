@@ -187,7 +187,8 @@ async def get_channel_details(
         logger.error(f"Error in get_channel_details: {str(e)}\n{error_traceback}")
         raise HTTPException(
             status_code=500,
-            detail=f"Internal Error: {str(e)}"
+            detail=f"Internal Error: {str(e)}",
+            logging={"error": str(e), "traceback": error_traceback}
         )
 
 
@@ -799,7 +800,6 @@ async def list_my_channels(
 
         channel_list = []
         for ch in channels:
-            # Logic การดึงค่าเหมือนที่ทำในหน้า userinfo
             
             # จุดตายที่ 2: การคำนวณค่าใน Loop
             max_size = ch.creator.get_max_file_size() if ch.creator else None
@@ -830,7 +830,6 @@ async def list_my_channels(
                 maximum_file_size=max_size,
                 search_key=ch.search_key,
             ))
-            
         return channel_list
 
     except Exception as e:

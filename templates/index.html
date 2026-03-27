@@ -350,6 +350,175 @@
       transform: translateX(-5px);
     }
 
+    .btn-announcement {
+      position: fixed;
+      top: 25px;
+      right: 25px;
+      z-index: 999;
+      background: linear-gradient(135deg, rgba(245, 13, 40, 0.9) 0%, rgba(102, 16, 242, 0.9) 100%);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 15px;
+      padding: 12px 20px;
+      color: white;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.3s ease;
+      text-decoration: none;
+      cursor: pointer;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.25);
+    }
+
+    .btn-announcement:hover {
+      transform: translateY(-3px);
+      color: white;
+      box-shadow: 0 15px 30px rgba(102, 16, 242, 0.35);
+    }
+
+    .btn-announcement:active {
+      transform: translateY(0);
+    }
+
+    .announcement-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 1100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      background: rgba(5, 5, 15, 0.7);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+    }
+
+    .announcement-modal.show {
+      display: flex;
+      animation: modalFadeIn 0.25s ease;
+    }
+
+    .announcement-dialog {
+      width: 100%;
+      max-width: 520px;
+      border-radius: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: linear-gradient(180deg, rgba(35, 35, 60, 0.95), rgba(20, 20, 40, 0.96));
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+      overflow: hidden;
+      animation: modalSlideUp 0.3s ease;
+    }
+
+    .announcement-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1.1rem 1.2rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .announcement-title {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin: 0;
+      color: #fff;
+    }
+
+    .announcement-close {
+      border: none;
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+
+    .announcement-close:hover {
+      background: rgba(255, 255, 255, 0.2);
+      transform: scale(1.05);
+    }
+
+    .announcement-body {
+      padding: 1.2rem;
+      text-align: left;
+    }
+
+    .announcement-body p {
+      margin-bottom: 0.8rem;
+      opacity: 0.95;
+      line-height: 1.6;
+    }
+
+    .announcement-body ul {
+      margin: 0;
+      padding-left: 1.2rem;
+      opacity: 0.9;
+    }
+
+    .announcement-body li {
+      margin-bottom: 0.35rem;
+    }
+
+    .announcement-footer {
+      display: flex;
+      gap: 0.7rem;
+      flex-wrap: wrap;
+      padding: 1rem 1.2rem 1.2rem;
+      justify-content: flex-end;
+    }
+
+    .btn-announcement-dismiss,
+    .btn-announcement-close {
+      border: none;
+      border-radius: 12px;
+      padding: 10px 16px;
+      font-weight: 600;
+      transition: all 0.2s ease;
+    }
+
+    .btn-announcement-dismiss {
+      background: linear-gradient(135deg, #f50d28 0%, #6610f2 100%);
+      color: #fff;
+    }
+
+    .btn-announcement-dismiss:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 18px rgba(102, 16, 242, 0.35);
+    }
+
+    .btn-announcement-close {
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+    }
+
+    .btn-announcement-close:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    @keyframes modalFadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    @keyframes modalSlideUp {
+      from {
+        opacity: 0;
+        transform: translateY(20px) scale(0.98);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
     /* Feature Cards */
     .features {
       display: flex;
@@ -408,6 +577,24 @@
           width: 100%;
       }
 
+      .btn-back,
+      .btn-announcement {
+        top: 12px;
+        padding: 10px 14px;
+      }
+
+      .btn-back {
+        left: 12px;
+      }
+
+      .btn-announcement {
+        right: 12px;
+      }
+
+      .announcement-footer {
+        justify-content: center;
+      }
+
       .features {
         flex-direction: column;
         align-items: center;
@@ -437,6 +624,11 @@
     <i class="bi bi-arrow-left"></i>
     กลับหน้าหลัก
   </a>
+
+  <button type="button" class="btn-announcement" onclick="openAnnouncementModal()">
+    <i class="bi bi-megaphone-fill"></i>
+    ประกาศ
+  </button>
 
   <div class="welcome-box">
     <div class="logo-icon">
@@ -495,13 +687,101 @@
       </span>
     </div>
   </div>
+
+  <div class="announcement-modal" id="announcementModal" aria-hidden="true" role="dialog" aria-labelledby="announcementTitle">
+    <div class="announcement-dialog" role="document">
+      <div class="announcement-header">
+        <h3 class="announcement-title" id="announcementTitle">
+          <i class="bi bi-megaphone-fill"></i>
+          ประกาศ
+        </h3>
+        <button type="button" class="announcement-close" aria-label="ปิด" onclick="closeAnnouncementModal()">
+          <i class="bi bi-x-lg"></i>
+        </button>
+      </div>
+      <div class="announcement-body">
+        <p>อัปเดต endpoint <b>"https://fastapi888.lukeenortaed.site/files/upload"</b></p>
+        <ul>
+          <li>รายละเอียดการอัปเดต</li>
+          <p>เพิ่ม Request body</p>
+          <p>"<b>tool_ocr</b>" หากไม่ใช้ต้องระบุเป็นค่าว่าง</p>
+        </ul>
+      </div>
+      <div class="announcement-footer">
+        <button type="button" class="btn-announcement-dismiss" onclick="dismissAnnouncementToday()">ไม่แจ้งเตือนอีกในวันนี้</button>
+        <button type="button" class="btn-announcement-close" onclick="closeAnnouncementModal()">ปิด</button>
+      </div>
+    </div>
+  </div>
 </body>
 
 <script>
+  const ANNOUNCEMENT_DISMISS_KEY = "announcementDismissDate";
+
   function getUrl() {
     const url = window.location.origin;
     return url;
   }
+
+  function getTodayDateString() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function openAnnouncementModal() {
+    const modal = document.getElementById("announcementModal");
+    if (!modal) {
+      return;
+    }
+    modal.classList.add("show");
+    modal.setAttribute("aria-hidden", "false");
+    document.body.style.overflow = "hidden";
+  }
+
+  function closeAnnouncementModal() {
+    const modal = document.getElementById("announcementModal");
+    if (!modal) {
+      return;
+    }
+    modal.classList.remove("show");
+    modal.setAttribute("aria-hidden", "true");
+    document.body.style.overflow = "";
+  }
+
+  function dismissAnnouncementToday() {
+    localStorage.setItem(ANNOUNCEMENT_DISMISS_KEY, getTodayDateString());
+    closeAnnouncementModal();
+  }
+
+  function shouldShowAnnouncementModalToday() {
+    const dismissedDate = localStorage.getItem(ANNOUNCEMENT_DISMISS_KEY);
+    return dismissedDate !== getTodayDateString();
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    const modal = document.getElementById("announcementModal");
+
+    if (modal) {
+      modal.addEventListener("click", function (event) {
+        if (event.target === modal) {
+          closeAnnouncementModal();
+        }
+      });
+    }
+
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        closeAnnouncementModal();
+      }
+    });
+
+    if (shouldShowAnnouncementModalToday()) {
+      openAnnouncementModal();
+    }
+  });
 
   function copyToClipboard(text) {
     navigator.clipboard.writeText(text).then(

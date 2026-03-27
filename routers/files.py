@@ -9,13 +9,13 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Form
 from fastapi import File as FastAPIFile, UploadFile
 from fastapi.responses import FileResponse, Response
-from llama_index.core import SimpleDirectoryReader
+from llama_index.core import Document, SimpleDirectoryReader
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from core.config import settings
-from core.enums import RoleChannel, RoleUser
+from core.enums import OCRTool, RoleChannel, RoleUser
 from core.hashids import encode_id, decode_id
 from core.security import get_current_user, get_optional_current_user
 from db.session import get_db
@@ -27,6 +27,7 @@ from rag_enginex import rag_engine
 
 # Import helpers from channels router
 from routers.channels import sniff_mime, _build_storage_path, _save_upload_atomic, UPLOAD_ROOT, MAX_SIZE_PER_FILE, ALLOW_MIME
+from services.ocr_service import process_pdf_per_page
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -105,6 +106,7 @@ async def list_files_in_channel(
 async def upload_files_only(
     channel_id: str = Form(...),
     files: list[UploadFile] = FastAPIFile(...),
+    tool_ocr: Optional[OCRTool] = Form(None, description="เลือกเครื่องมือ OCR (ถ้าไม่ระบุจะใช้วิธีปกติ)"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -160,23 +162,38 @@ async def upload_files_only(
             await db.flush()  # ได้ files_id
             await db.refresh(frow)
 
-            # 7) เติมเอกสารเข้า RAG (Chroma) --- จุดเสี่ยงสูง ---
+            # 7) เติมเอกสารเข้า RAG (LanceDB)
             try:
                 logger.info(f"DEBUG: กำลังส่งไฟล์ {frow.original_filename} ไปยัง RAG Engine...")
                 abs_path = UPLOAD_ROOT / rel_path
-                
-                # เช็คว่าไฟล์มีอยู่จริงไหม
+
                 if not abs_path.exists():
-                     raise FileNotFoundError(f"หาไฟล์ไม่เจอที่: {abs_path}")
+                    raise FileNotFoundError(f"หาไฟล์ไม่เจอที่: {abs_path}")
 
-                docs = SimpleDirectoryReader(input_files=[str(abs_path)]).load_data()
-                for d in docs:
-                    d.metadata = d.metadata or {}
-                    d.metadata["channel_id"] = str(real_channel_id)
-                    d.metadata["filename"] = frow.original_filename
-                    d.metadata["files_id"] = str(frow.files_id)
+                # --- เลือกวิธีดึง text ---
+                if tool_ocr == OCRTool.easyocr and detected_mime == "application/pdf":
+                    raw_text, ocr_flags = process_pdf_per_page(abs_path)
+                    ocr_count = sum(ocr_flags)
+                    total_pages = len(ocr_flags)
+                    logger.info(f"OCR {ocr_count}/{total_pages} pages → {frow.original_filename}")
+                    docs = [Document(
+                        text=raw_text,
+                        metadata={
+                            "channel_id": str(real_channel_id),
+                            "filename": frow.original_filename,
+                            "files_id": str(frow.files_id),
+                            "ocr_tool": tool_ocr.value if ocr_flags else "pymupdf",
+                        },
+                    )]
+                else:
+                    # ไฟล์ทั่วไป หรือไม่ได้เลือก OCR → ใช้ SimpleDirectoryReader ปกติ
+                    docs = SimpleDirectoryReader(input_files=[str(abs_path)]).load_data()
+                    for d in docs:
+                        d.metadata = d.metadata or {}
+                        d.metadata["channel_id"] = str(real_channel_id)
+                        d.metadata["filename"] = frow.original_filename
+                        d.metadata["files_id"] = str(frow.files_id)
 
-                # เติมเอกสารลงคอลเลกชันเดิม
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, rag_engine.add_documents, docs)
                 logger.info("DEBUG: RAG Engine ทำงานสำเร็จ")

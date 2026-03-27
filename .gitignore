@@ -32,7 +32,7 @@ Thumbs.db
 
 # vecotorstore
 chroma_db/
-
+lancedb/
 # files storage
 uploads/
 trash/

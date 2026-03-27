@@ -19,7 +19,7 @@ from llama_index.core import (
 )
 from llama_index.core.node_parser import SemanticSplitterNodeParser
 from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
-from llama_index.core.schema import NodeWithScore, TextNode
+from llama_index.core.schema import TextNode
 from llama_index.storage.chat_store.redis import RedisChatStore
 
 from llama_index.core.memory import ChatMemoryBuffer
@@ -39,7 +39,6 @@ from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.core.chat_engine import CondensePlusContextChatEngine
 
-from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
 
 from threading import RLock
 
@@ -90,7 +89,7 @@ class AppConfig:
     # Models
     EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "ministral-3:3b")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma3:1b")
     
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -223,17 +222,15 @@ class RAGService:
             f"Loading in parallel — "
             f"EmbedModel: [yellow]{config.EMBED_MODEL_NAME}[/]  |  "
             f"LLM: [yellow]{config.OLLAMA_MODEL}[/]  |  "
-            f"Reranker: [yellow]bge-reranker-v2-m3[/]"
         )
 
-        with ThreadPoolExecutor(max_workers=3) as pool:  # เพิ่มเป็น 3
+        with ThreadPoolExecutor(max_workers=2) as pool:
             embed_future    = pool.submit(self._init_embed_model)
             llm_future      = pool.submit(self._init_llm)
-            reranker_future = pool.submit(self._init_reranker)  # ← เพิ่ม
 
             self.embed_model = embed_future.result()
             self.llm         = llm_future.result()
-            self.reranker    = reranker_future.result()         # ← เพิ่ม
+            LlamaSettings.llm = self.llm  
 
         logger.info("Initializing Node Parser...")
         self.node_parser = self._init_node_parser()
@@ -249,11 +246,7 @@ class RAGService:
             trust_remote_code=True
         )
     
-    def _init_reranker(self) -> FlagEmbeddingReranker:
-        return FlagEmbeddingReranker(
-            model="BAAI/bge-reranker-v2-m3",  # รองรับภาษาไทยได้ดี
-            top_n=config.TOP_K,               # เหลือ TOP_K หลัง rerank
-        )
+    
 
     def _init_node_parser(self) -> SemanticSplitterNodeParser:
         return SemanticSplitterNodeParser.from_defaults(
@@ -266,7 +259,7 @@ class RAGService:
         return Ollama(
             model=config.OLLAMA_MODEL,
             base_url=config.OLLAMA_BASE_URL,
-            request_timeout=120.0,
+            request_timeout=600.00,
             context_window=config.CONTEXT_WINDOW,
             num_output=config.NUM_OUTPUT,
             system_prompt=config.SAFETY_SYSTEM_PROMPT,
@@ -426,7 +419,6 @@ class RAGService:
             retriever=hybrid_retriever,
             memory=memory,
             llm=self.llm,
-            node_postprocessors=[self.reranker],
             system_prompt=config.SAFETY_SYSTEM_PROMPT,
         )
 
@@ -459,7 +451,7 @@ class RAGService:
         logger.info(f"Successfully added [bold green]{len(nodes)}[/] nodes to index.")
 
     def delete_documents_by_metadata(self, metadata: Dict[str, Any]):
-        where_clauses = [f"{k} = '{v}'" for k, v in metadata.items()]
+        where_clauses = [f"metadata.{k} = '{v}'" for k, v in metadata.items()]
         where_str = " AND ".join(where_clauses)
         logger.info(f"Deleting documents where: [yellow]{where_str}[/]")
 
