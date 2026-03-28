@@ -31,7 +31,7 @@ class ChannelOut(ORMBase):
     title: str
     description: Optional[str]
     status: RoleChannel
-    maximum_file_size: int
+    maximum_file_size: Optional[int]
     created_at: datetime
     files: List[FileDetail] 
     

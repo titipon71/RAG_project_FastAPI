@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from db.models.account_type import AccountType
 from db.models.user import User
 
 
@@ -32,4 +33,9 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> O
     if not user or not verify_password(password, user.hashed_password):
         return None
     return user
+
+async def get_account_type(db, type_name: str):
+    stmt = select(AccountType).where(AccountType.type_name == type_name)
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
 

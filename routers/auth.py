@@ -15,7 +15,7 @@ from db.models.account_type import AccountType
 from db.session import get_db
 from db.models.user import User
 from schemas.auth import SSOCodeRequest
-from services.user_service import authenticate_user
+from services.user_service import authenticate_user, get_account_type
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -140,17 +140,21 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
             stmt = select(User).where(User.username == username)
             result = await db.execute(stmt)
             user = result.scalar_one_or_none()
+            account_type_name = sso_data.get("profile", {}).get("account_type")
+            account_type = await get_account_type(db, account_type_name)
 
             if not user:
                 new_user = User(
                     username=username,
                     name=sso_data.get("profile", {}).get("name_en"),
-                    email=sso_data.get("profile", {}).get("email"),
-                    account_type=sso_data.get("profile", {}).get("account_type"),
-                    hashed_password=username,  # แนะนำให้เปลี่ยนใน production
+                    hashed_password=username,
                     role=RoleUser.user,
                     active_at=func.current_timestamp()
                 )
+
+                if account_type:
+                    new_user.account_type_rel = account_type
+
                 db.add(new_user)
                 await db.flush()
                 await db.refresh(new_user)

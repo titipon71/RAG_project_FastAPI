@@ -113,36 +113,50 @@ async def create_channel(
 
 
 
+import traceback
+from fastapi import HTTPException, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy.orm import joinedload, selectinload
+
 @router.get("/channels/{channel_id}", response_model=ChannelOut, tags=["Channels"])
 async def get_channel_details(
-    channel_id: str, 
+    channel_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
-    ):
+):
     try:
+        logger.info(f"Request channel_id={channel_id}, user_id={current_user.users_id}")
+
         decoded_channel_id = decode_id(channel_id)
+        logger.debug(f"Decoded channel_id={decoded_channel_id}")
+
         stmt = (
             select(Channel)
             .options(
-                joinedload(Channel.creator).joinedload(User.account_type_rel),                
+                joinedload(Channel.creator).joinedload(User.account_type_rel),
                 selectinload(Channel.files)
             )
             .where(Channel.channels_id == decoded_channel_id)
         )
+
         result = await db.execute(stmt)
-        channel = result.scalars().unique().one_or_none()        
+        channel = result.scalars().unique().one_or_none()
+
         if channel is None:
+            logger.warning(f"Channel not found: {decoded_channel_id}")
             raise HTTPException(status_code=404, detail="ไม่พบช่อง Channel")
-        
-        is_private_like = channel.status in (RoleChannel.private , RoleChannel.pending)
+
+        is_private_like = channel.status in (RoleChannel.private, RoleChannel.pending)
         is_owner = channel.created_by == current_user.users_id
         is_admin = current_user.role == RoleUser.admin
-            
-        # ตรวจสอบสิทธิ์การเข้าถึง
+
         if is_private_like and not (is_owner or is_admin):
+            logger.warning(
+                f"Permission denied: user={current_user.users_id}, channel={decoded_channel_id}"
+            )
             raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์เข้าถึง channel")
-        
-        # ดึงรายการไฟล์ที่อยู่ใน channel นี้
+
         creator = channel.creator
 
         max_size = None
@@ -151,24 +165,31 @@ async def get_channel_details(
                 max_size = creator.file_size_custom
             elif creator.account_type_rel:
                 max_size = creator.account_type_rel.file_size_default
-        
+
         file_list = []
         for f in channel.files:
+            try:
+                mime_type = sniff_mime(UPLOAD_ROOT / f.storage_uri)
+            except Exception as mime_err:
+                logger.error(f"MIME error for file {f.files_id}: {mime_err}")
+                mime_type = "unknown"
+
             item = {
                 "files_id": f.files_id,
                 "original_filename": f.original_filename,
                 "size_bytes": f.size_bytes,
                 "created_at": f.created_at,
-                "mime": sniff_mime(UPLOAD_ROOT / f.storage_uri),
+                "mime": mime_type,
                 "channel_id": f.channel_id
             }
 
             if channel.status == RoleChannel.public:
                 item["public_url"] = f"/static/uploads/{f.storage_uri}"
             else:
-                item["public_url"] = "None (เฉพาะช่องทางสาธารณะเท่านั้นที่เข้าถึงไฟล์ผ่าน URL ได้)"
+                item["public_url"] = None
 
             file_list.append(item)
+
         return {
             "channels_id": channel.channels_id,
             "title": channel.title,
@@ -179,16 +200,18 @@ async def get_channel_details(
             "files": file_list
         }
 
-    except HTTPException:
-        raise
+    except HTTPException as http_err:
+        logger.warning(f"HTTPException: {http_err.detail}")
+        raise http_err
+
     except Exception as e:
-        traceback.print_exc()
-        error_traceback = traceback.format_exc()
-        logger.error(f"Error in get_channel_details: {str(e)}\n{error_traceback}")
+        logger.exception("🔥 ERROR in get_channel_details")
+        
+        # logger.exception จะ log traceback ให้อัตโนมัติ
+
         raise HTTPException(
             status_code=500,
-            detail=f"Internal Error: {str(e)}",
-            logging={"error": str(e), "traceback": error_traceback}
+            detail=str(e)
         )
 
 

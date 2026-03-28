@@ -1,3 +1,4 @@
+from email.mime import text
 import os
 import re
 import logging
@@ -38,6 +39,7 @@ from concurrent.futures import ThreadPoolExecutor
 from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.core.chat_engine import CondensePlusContextChatEngine
+from pythainlp.tokenize import word_tokenize
 
 
 from threading import RLock
@@ -239,6 +241,9 @@ class RAGService:
         os.makedirs(config.DATA_DIR, exist_ok=True)
         os.makedirs(config.LANCEDB_DIR, exist_ok=True) 
 
+    def thai_tokenizer(text: str):
+        return word_tokenize(text, engine="newmm")
+
     def _init_embed_model(self) -> HuggingFaceEmbedding:
         return HuggingFaceEmbedding(
             model_name=config.EMBED_MODEL_NAME,
@@ -392,6 +397,7 @@ class RAGService:
             bm25_retriever = BM25Retriever.from_defaults(
                 nodes=channel_nodes,
                 similarity_top_k=config.TOP_K * 2,
+                tokenizer=self.thai_tokenizer
             )
             retrievers = [vector_retriever, bm25_retriever]
             logger.info(f"Using hybrid retriever ({len(channel_nodes)} nodes in BM25)")
