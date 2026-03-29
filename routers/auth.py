@@ -160,11 +160,8 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
                 await db.refresh(new_user)
                 user = new_user
             else:
-                if user.role == RoleUser.admin:
-                    account_type_name = RoleUser.admin.upper()
-                else:
-                    account_type_name = sso_data.get("profile", {}).get("account_type")
-
+                account_type_name = sso_data.get("profile", {}).get("account_type")
+                logger.info(f"Existing user logged in via SSO: {username} | account_type from SSO: {account_type_name}")
                 if account_type_name:
                     stmt = select(AccountType).where(AccountType.type_name == account_type_name)
                     result = await db.execute(stmt)

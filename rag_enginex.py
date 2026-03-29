@@ -16,7 +16,9 @@ from llama_index.core import (
     VectorStoreIndex,
     StorageContext,
     Document,
-    Settings as LlamaSettings
+    Settings as LlamaSettings,
+    DocumentSummaryIndex,
+    get_response_synthesizer
 )
 from llama_index.core.node_parser import SemanticSplitterNodeParser
 from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
@@ -40,6 +42,8 @@ from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.core.chat_engine import CondensePlusContextChatEngine
 from pythainlp.tokenize import word_tokenize
+from llama_index.llms.openai_like import OpenAILike
+from llama_index.llms.gemini import Gemini
 
 
 from threading import RLock
@@ -97,7 +101,7 @@ class AppConfig:
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
     
     # Parameters
-    CONTEXT_WINDOW: int = 4096
+    CONTEXT_WINDOW: int = 32768
     NUM_OUTPUT: int = 512
     TOP_K: int = 5
     CHUNK_SIZE: int = 512 # สำหรับ Splitting
@@ -113,6 +117,20 @@ class AppConfig:
     
     MAX_CACHE_NODES: int = int(os.getenv("MAX_CACHE_NODES", "100000"))
 
+    
+    # === OpenRouter ===
+    USE_OPENROUTER: bool = os.getenv("USE_OPENROUTER", "false").lower() == "true"
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "mistralai/ministral-3b-2512")
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_CONTEXT_WINDOW: int = int(os.getenv("OPENROUTER_CONTEXT_WINDOW", "262144"))
+    
+    # === Google Gemini ===
+    USE_GEMINI: bool = os.getenv("USE_GEMINI", "false").lower() == "true"
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "models/gemini-1.5-flash")
+    GEMINI_CONTEXT_WINDOW: int = int(os.getenv("GEMINI_CONTEXT_WINDOW", "1048576"))
+    
 config = AppConfig()
 
 # ==========================================
@@ -128,18 +146,21 @@ class OllamaTokenHandler(BaseCallbackHandler):
         pass  
 
     def on_event_end(self, event_type, payload, event_id, **kwargs):
-        if event_type == CBEventType.LLM:
-            response = payload.get(EventPayload.RESPONSE)
-            # ตรวจสอบว่ามีข้อมูล raw จาก Ollama หรือไม่
-            if hasattr(response, "raw") and isinstance(response.raw, dict):
-                p_tokens = response.raw.get("prompt_eval_count", 0)
-                c_tokens = response.raw.get("eval_count", 0)
-                
-                self.latest_usage = {
-                    "prompt_tokens": p_tokens,
-                    "completion_tokens": c_tokens,
-                    "total_tokens": p_tokens + c_tokens
-                }
+            if event_type == CBEventType.LLM:
+                response = payload.get(EventPayload.RESPONSE)
+
+                # Ollama path
+                if hasattr(response, "raw") and isinstance(response.raw, dict):
+                    p = response.raw.get("prompt_eval_count", 0)
+                    c = response.raw.get("eval_count", 0)
+                    self.latest_usage = {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
+
+                # OpenAI-compatible path (OpenRouter)
+                elif hasattr(response, "raw") and hasattr(response.raw, "usage"):
+                    usage = response.raw.usage
+                    p = getattr(usage, "prompt_tokens", 0)
+                    c = getattr(usage, "completion_tokens", 0)
+                    self.latest_usage = {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
     
     def start_trace(self, trace_id=None):
         pass
@@ -189,41 +210,38 @@ class RAGService:
         logger.info("[bold green]✅ RAG Service Ready![/]")
 
     def _add_nodes_to_cache(self, nodes):
-
         if not nodes:
             return
 
         with self.nodes_lock:
-
             for node in nodes:
-
                 node_id = node.node_id or node.id_
-
                 if not node_id:
                     continue
-
                 self.nodes_cache[node_id] = node
 
             # enforce size limit
             if len(self.nodes_cache) > config.MAX_CACHE_NODES:
-
                 overflow = len(self.nodes_cache) - config.MAX_CACHE_NODES
-
-                # remove oldest
                 keys_to_remove = list(self.nodes_cache.keys())[:overflow]
-
                 for k in keys_to_remove:
                     del self.nodes_cache[k]
 
-            logger.info(
-                f"nodes_cache size: {len(self.nodes_cache)}"
-            )
+        # ✅ log แค่ครั้งเดียวตอนเสร็จ
+        logger.info(f"nodes_cache size: {len(self.nodes_cache)} (+{len(nodes)} added)")
     
     def _init_models_parallel_sync(self):
+        if config.USE_GEMINI:
+            llm_label = f"Gemini/{config.GEMINI_MODEL}"
+        elif config.USE_OPENROUTER:
+            llm_label = f"OpenRouter/{config.OPENROUTER_MODEL}"
+        else:
+            llm_label = f"Ollama/{config.OLLAMA_MODEL}"
+            
         logger.info(
             f"Loading in parallel — "
             f"EmbedModel: [yellow]{config.EMBED_MODEL_NAME}[/]  |  "
-            f"LLM: [yellow]{config.OLLAMA_MODEL}[/]  |  "
+            f"LLM: [yellow]{llm_label}[/]  |  "
         )
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -256,17 +274,63 @@ class RAGService:
     def _init_node_parser(self) -> SemanticSplitterNodeParser:
         return SemanticSplitterNodeParser.from_defaults(
             embed_model=self.embed_model,
-            breakpoint_percentile_threshold=95,
-            buffer_size=3
+            breakpoint_percentile_threshold=80,
+            buffer_size=5
         )
 
-    def _init_llm(self) -> Ollama:
+    def _init_llm(self):
+        if config.USE_GEMINI:
+            return self._init_gemini_llm()
+        if config.USE_OPENROUTER:
+            return self._init_openrouter_llm()
+        return self._init_ollama_llm()
+    
+    def _init_ollama_llm(self) -> Ollama:
+        logger.info(f"Using [bold green]Ollama[/] — model: [yellow]{config.OLLAMA_MODEL}[/]")
         return Ollama(
             model=config.OLLAMA_MODEL,
             base_url=config.OLLAMA_BASE_URL,
             request_timeout=600.00,
             context_window=config.CONTEXT_WINDOW,
             num_output=config.NUM_OUTPUT,
+            system_prompt=config.SAFETY_SYSTEM_PROMPT,
+        )
+    
+    def _init_openrouter_llm(self):
+
+        if not config.OPENROUTER_API_KEY:
+            raise ValueError("OPENROUTER_API_KEY is not set in environment variables.")
+
+        logger.info(
+            f"Using [bold magenta]OpenRouter[/] — model: [yellow]{config.OPENROUTER_MODEL}[/]"
+        )
+
+        return OpenAILike(
+            model=config.OPENROUTER_MODEL,
+            api_base=config.OPENROUTER_BASE_URL,
+            api_key=config.OPENROUTER_API_KEY,
+            context_window=config.OPENROUTER_CONTEXT_WINDOW,
+            max_tokens=config.NUM_OUTPUT,
+            is_chat_model=True,
+            system_prompt=config.SAFETY_SYSTEM_PROMPT,
+            default_headers={
+                "HTTP-Referer": os.getenv("OPENROUTER_REFERER", "http://localhost"),
+                "X-Title": os.getenv("OPENROUTER_APP_TITLE", "RAG-App"),
+            },
+        )
+    
+    def _init_gemini_llm(self) -> Gemini:
+        if not config.GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is not set in environment variables.")
+
+        logger.info(
+            f"Using [bold blue]Google Gemini[/] — model: [yellow]{config.GEMINI_MODEL}[/]"
+        )
+
+        return Gemini(
+            model=config.GEMINI_MODEL,
+            api_key=config.GEMINI_API_KEY,
+            max_tokens=config.NUM_OUTPUT,
             system_prompt=config.SAFETY_SYSTEM_PROMPT,
         )
 
@@ -335,6 +399,7 @@ class RAGService:
 
             from llama_index.core.schema import TextNode
 
+            all_nodes = []
             for _, row in rows.iterrows():
                 metadata = row.get("metadata", {})
                 # LanceDB เก็บ metadata เป็น dict อยู่แล้ว
@@ -347,7 +412,10 @@ class RAGService:
                     metadata=metadata,
                     id_=row.get("id", None),
                 )
-                self._add_nodes_to_cache([node])
+                
+                all_nodes.append(node)
+                
+            self._add_nodes_to_cache(all_nodes)
 
             logger.info(f"Loaded [bold green]{len(self.nodes_cache)}[/] nodes into BM25 cache from LanceDB.")
 

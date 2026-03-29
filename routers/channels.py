@@ -80,7 +80,7 @@ async def _save_upload_atomic(uf: UploadFile, final_path: pathlib.Path, max_size
             if not chunk:
                 break
             size_bytes += len(chunk)
-            if size_bytes > max_size:
+            if max_size is not None and size_bytes > max_size:
                 await uf.close()
                 raise HTTPException(status_code=413, detail=f"ไฟล์มีขนาดใหญ่เกินไป: {uf.filename}")
             await f.write(chunk)
@@ -159,12 +159,7 @@ async def get_channel_details(
 
         creator = channel.creator
 
-        max_size = None
-        if creator:
-            if creator.file_size_custom is not None:
-                max_size = creator.file_size_custom
-            elif creator.account_type_rel:
-                max_size = creator.account_type_rel.file_size_default
+        max_size = max_size = creator.get_max_file_size() if creator else None
 
         file_list = []
         for f in channel.files:

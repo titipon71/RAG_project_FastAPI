@@ -28,13 +28,20 @@ class User(Base):
     account_type_rel = relationship("AccountType", back_populates="users")
     
     def get_max_file_size(self) -> Optional[int]:
+        # 🥇 Admin = unlimited
+        if self.role == RoleUser.admin:
+            return None
+
+        # 🥈 User custom override
         if self.file_size_custom is not None:
             return self.file_size_custom
 
+        # 🥉 Account type default
         if (
             self.account_type_rel
             and self.account_type_rel.file_size_default is not None
         ):
             return self.account_type_rel.file_size_default
 
+        # ❌ ไม่มี config = unlimited (หรือจะใส่ default ก็ได้)
         return None
