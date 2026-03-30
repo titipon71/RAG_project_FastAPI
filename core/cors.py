@@ -10,6 +10,7 @@ ALLOWED_ORIGINS = [
     "https://docsmind-rag.lukeenortaed.site",
     "https://titipon71.github.io",
     "https://project-rag-six.vercel.app",
+    "http://172.20.10.3:3000",
 ]
 
 ALLOW_ORIGIN_REGEX = r"https://.*\.ngrok-free\.app"

@@ -108,11 +108,9 @@ class AppConfig:
     
     # Prompts
     SAFETY_SYSTEM_PROMPT: str = (
-        "คุณคือผู้ช่วยอัจฉริยะที่ตอบคำถามเป็นภาษาไทยอย่างสุภาพและชัดเจน "
-        "โปรดตอบเฉพาะคำตอบสุดท้ายเท่านั้น ห้ามแสดงขั้นตอนการคิด "
-        "ห้ามใส่ข้อความในแท็ก <think>...</think> "
-        "อย่าคิดเสียงดังหรืออธิบายกระบวนการคิดของคุณ."
         "เอาความรู้มาจากเอกสารที่มีเท่านั้น ถ้าไม่มีในเอกสารให้บอกว่า 'ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่มีอยู่ 😔' "
+        "คุณคือผู้ช่วยอัจฉริยะที่ตอบคำถามอย่างสุภาพและชัดเจน "
+        "หากผู้ใช้ถามสรุป ให้ลองพิจารณาข้อมูลจากส่วน metadata 'section_summary' หรือภาพรวมของเอกสารที่แนบมาด้วย"
     )
     
     MAX_CACHE_NODES: int = int(os.getenv("MAX_CACHE_NODES", "100000"))
@@ -230,6 +228,23 @@ class RAGService:
         # ✅ log แค่ครั้งเดียวตอนเสร็จ
         logger.info(f"nodes_cache size: {len(self.nodes_cache)} (+{len(nodes)} added)")
     
+    def _build_summary_nodes(self, docs: List[Document]) -> List[TextNode]:
+
+        response_synthesizer = get_response_synthesizer(
+            response_mode="tree_summarize",
+            use_async=False  # แก้ให้ตรงกับ sync context ด้วย
+        )
+
+        summary_index = DocumentSummaryIndex.from_documents(
+            docs,
+            llm=self.llm,
+            embed_model=self.embed_model,
+            response_synthesizer=response_synthesizer,
+            show_progress=True,
+        )
+
+        return list(summary_index.docstore.get_all_nodes())
+    
     def _init_models_parallel_sync(self):
         if config.USE_GEMINI:
             llm_label = f"Gemini/{config.GEMINI_MODEL}"
@@ -310,7 +325,7 @@ class RAGService:
             api_base=config.OPENROUTER_BASE_URL,
             api_key=config.OPENROUTER_API_KEY,
             context_window=config.OPENROUTER_CONTEXT_WINDOW,
-            max_tokens=config.NUM_OUTPUT,
+            max_tokens=4096,
             is_chat_model=True,
             system_prompt=config.SAFETY_SYSTEM_PROMPT,
             default_headers={
@@ -344,38 +359,59 @@ class RAGService:
         return db, vector_store
 
     def _load_or_create_index(self) -> VectorStoreIndex:
+        """
+        โหลดหรือสร้าง Index ใหม่ โดยเพิ่มความสามารถในการสรุปเอกสาร (DocumentSummaryIndex)
+        """
         try:
             existing_tables = self.lance_db.table_names()
             if config.TABLE_NAME in existing_tables:
                 logger.info(f"Found existing LanceDB table: [green]{config.TABLE_NAME}[/]")
+                
+                # โหลด Vector Index เดิม
                 index = VectorStoreIndex.from_vector_store(
                     self.vector_store,
                     embed_model=self.embed_model,
                 )
-                # โหลด nodes เข้า cache หลัง index พร้อม
+                
+                # โหลด nodes เข้า cache สำหรับ BM25
                 self._load_nodes_cache_from_lancedb()
                 return index
             else:
-                raise ValueError(f"Table '{config.TABLE_NAME}' not found, will create new index.")
+                # ถ้าไม่เจอ Table ให้ข้ามไปที่ Exception เพื่อสร้างใหม่
+                raise ValueError(f"Table '{config.TABLE_NAME}' not found.")
+                
         except Exception as e:
-            logger.warning(f"Could not load index from vector store: {e}")
-            logger.info("Creating new index from documents in DATA_DIR...")
+            logger.warning(f"Creating new index because: {e}")
+            logger.info("Reading documents from DATA_DIR...")
 
+            # 1. โหลดเอกสาร
             documents = []
             try:
                 documents = SimpleDirectoryReader(config.DATA_DIR).load_data()
+                # ใส่ metadata พื้นฐาน
                 for d in documents:
                     d.metadata = d.metadata or {}
                     d.metadata.setdefault("channel_id", "global")
-            except ValueError:
-                logger.warning("No documents found to initialize.")
+            except Exception as read_err:
+                logger.error(f"Error reading directory: {read_err}")
 
-            nodes = self.node_parser.get_nodes_from_documents(documents) if documents else []
+            if not documents:
+                logger.warning("No documents found. Returning an empty VectorStoreIndex.")
+                return VectorStoreIndex([], storage_context=self.storage_context, embed_model=self.embed_model)
 
-            # เก็บลง cache ด้วยถ้ามี nodes
+            # 3. สร้าง DocumentSummaryIndex (จุดที่ทำให้ RAG สรุปได้)
+            # ตัวนี้จะวิ่งไปสั่ง LLM สรุปแต่ละไฟล์เก็บไว้เป็น Metadata พิเศษ
+            logger.info("[bold yellow]Generating Document Summaries... (This may take a moment)[/]")
+            
+            # ดึง Nodes ทั้งหมดออกมา (ซึ่งตอนนี้จะมี Metadata สรุปติดมาด้วยแล้ว)
+            nodes = self._build_summary_nodes(documents)
+
+            # 4. เก็บลง cache สำหรับ BM25
             if nodes:
                 self._add_nodes_to_cache(nodes)
 
+            # 5. สร้าง VectorStoreIndex ตัวหลักที่จะใช้ใน Chat Engine
+            logger.info("Finalizing VectorStoreIndex...")
             return VectorStoreIndex(
                 nodes,
                 storage_context=self.storage_context,
@@ -507,22 +543,43 @@ class RAGService:
     # --- Public Methods ---
 
     def add_documents(self, docs: List[Document]):
+        """
+        เพิ่มเอกสารใหม่ โดยมีการทำ Summary ก่อนเก็บลง Vector Index
+        """
         if not docs:
+            logger.warning("No documents provided to add.")
             return
 
-        logger.info(f"Adding [bold]{len(docs)}[/] documents...")
+        logger.info(f"Adding [bold]{len(docs)}[/] documents with Auto-Summary...")
+
+        # 1. เตรียม Metadata พื้นฐานสำหรับเอกสารใหม่
         for d in docs:
             d.metadata = d.metadata or {}
+            # ตรวจสอบว่ามี channel_id หรือยัง ถ้าไม่มีให้ใส่ default
+            if "channel_id" not in d.metadata:
+                d.metadata["channel_id"] = "global"
 
-        nodes = self.node_parser.get_nodes_from_documents(docs)
-        self.index.insert_nodes(nodes)
-        self._add_nodes_to_cache(nodes)
+        try:
+     
+            # 3. ดึง Nodes ที่ถูกสรุปและจัดการ Metadata เรียบร้อยแล้วออกมา
+            new_nodes = self._build_summary_nodes(docs)  # แก้ให้ใช้เอกสารต้นฉบับที่มี metadata สรุปแล้ว
 
-        # ← clear เพื่อให้ engine ถัดไปสร้าง BM25 ใหม่จาก nodes ที่อัปเดตแล้ว
-        with self.engine_lock:
-            self.chat_engines.clear()
-            
-        logger.info(f"Successfully added [bold green]{len(nodes)}[/] nodes to index.")
+            # 4. Insert nodes เหล่านี้ลงใน VectorStoreIndex หลัก (LanceDB)
+            if new_nodes:
+                self.index.insert_nodes(new_nodes)
+                self._add_nodes_to_cache(new_nodes)
+                
+                # 5. Clear chat_engines cache เพื่อให้การ Query ครั้งต่อไปเห็นข้อมูลใหม่
+                with self.engine_lock:
+                    self.chat_engines.clear()
+                
+                logger.info(f"[bold green]✅ Successfully added {len(new_nodes)} nodes with summaries to index.[/]")
+            else:
+                logger.warning("No nodes generated from the provided documents.")
+
+        except Exception as e:
+            logger.error(f"[bold red]❌ Failed to add documents:[/]\n{e}")
+            raise e
 
     def delete_documents_by_metadata(self, metadata: Dict[str, Any]):
         where_clauses = [f"metadata.{k} = '{v}'" for k, v in metadata.items()]
