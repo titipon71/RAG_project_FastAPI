@@ -147,7 +147,20 @@ async def Talking_with_Ollama_from_document(
         # STEP 3: Logic การบันทึกและตอบกลับ
         # -------------------------------------------------------
         sender_id = current_user.users_id if current_user else None
-
+        keywords = ["ฟหก", "กหฟ", "หฟ", "ฟห", "กห", "ฟก"]
+        if any(keyword in payload.message for keyword in keywords):
+            return {
+                "user_message": {
+                    "chat_id": None,
+                    "message": payload.message,
+                    "created_at": None,
+                },
+                "ai_message": { 
+                    "message": "คุณพิมพ์อะไรมาเนี่ย? ลองใหม่อีกทีนะ!",
+                },
+                "token_usage": 0
+            }
+        
         # 1. เรียก AI ก่อน
         ai_messages = [{"role": "user", "content": payload.message}]
         ai_result = await call_ai(ai_messages, sess.channel_id, sess.sessions_id)
