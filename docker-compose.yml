@@ -7,63 +7,21 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: mysql+asyncmy://rag:rag_password@db:3306/rag?charset=utf8mb4
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: ${APP_DATABASE_URL:-mysql+asyncmy://rag:rag_password@host.docker.internal:3306/rag?charset=utf8mb4}
+      REDIS_URL: ${APP_REDIS_URL:-redis://host.docker.internal:6379/0}
+      USE_OPENROUTER: ${APP_USE_OPENROUTER:-true}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_MODEL: ${APP_OPENROUTER_MODEL:-mistralai/ministral-3b-2512}
+      OPENROUTER_CONTEXT_WINDOW: ${APP_OPENROUTER_CONTEXT_WINDOW:-131072}
+      USE_GEMINI: ${APP_USE_GEMINI:-false}
     ports:
       - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./file_storage/uploads:/app/file_storage/uploads
       - ./file_storage/trash:/app/file_storage/trash
       - ./uploads:/app/uploads
       - ./trash:/app/trash
       - ./lancedb:/app/lancedb
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     restart: unless-stopped
-
-  db:
-    image: mariadb:10.11
-    container_name: rag-mariadb
-    environment:
-      MARIADB_ROOT_PASSWORD: root_password
-      MARIADB_DATABASE: rag
-      MARIADB_USER: rag
-      MARIADB_PASSWORD: rag_password
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
-    ports:
-      - "3306:3306"
-    volumes:
-      - mariadb_data:/var/lib/mysql
-      - ./rag.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-    healthcheck:
-      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-uroot", "-proot_password"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    container_name: rag-redis
-    command: redis-server --appendonly yes
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-    restart: unless-stopped
-
-volumes:
-  mariadb_data:
-  redis_data:

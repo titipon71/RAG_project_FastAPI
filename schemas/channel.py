@@ -54,9 +54,9 @@ class ChannelOneResponse(ORMBase):
     description: Optional[str] = None
     status: RoleChannel
     created_by_id: int = Field(validation_alias='created_by') # Map field DB
-    created_by_name: str = "Unknown" # ต้องจัดการใน Router หรือใช้ property
+    created_by_name: str = "Unknown" # ต้องจัดการใน Router หรือใช้ propertyั
     maximum_file_size: Optional[int] = None
-    search_key : str
+    search_key : Optional[str]
     created_at: datetime
     file_count: int = 0
     files: List[FileDetail]
