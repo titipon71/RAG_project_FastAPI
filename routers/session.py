@@ -1,8 +1,9 @@
+import json
 import logging
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Body
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -102,32 +103,27 @@ async def delete_session(
 # ============================================================
 #                  CHAT + AI ROUTES
 # ============================================================
-@router.post("/sessions/ollama-reply", status_code=201, tags=["Chat & AI"])
+@router.post("/sessions/ollama-reply", tags=["Chat & AI"])
 async def Talking_with_Ollama_from_document(
     payload: ChatRequest = Body(...),
     db: AsyncSession = Depends(get_db),
-    # รับได้ทั้ง User และ None (Guest)
     current_user: Optional[User] = Depends(get_optional_current_user),
 ):
     try:
         real_session_id = payload.sessions_id
         if isinstance(real_session_id, str):
-             real_session_id = decode_id(real_session_id)
+            real_session_id = decode_id(real_session_id)
 
-        # -------------------------------------------------------
-        # STEP 1: ค้นหา Session และ Join Channel ในคำสั่งเดียว
-        # -------------------------------------------------------
+        # STEP 1: ค้นหา Session
         stmt = (
             select(Sessions)
-            .options(joinedload(Sessions.channel)) # 👈 ใช้ joinedload ได้แล้ว
+            .options(joinedload(Sessions.channel))
             .where(Sessions.sessions_id == real_session_id)
         )
-
-        # Filter เจ้าของ Session
         if current_user:
             stmt = stmt.where(Sessions.user_id == current_user.users_id)
         else:
-            stmt = stmt.where(Sessions.user_id.is_(None)) # Guest ต้องเป็น NULL
+            stmt = stmt.where(Sessions.user_id.is_(None))
 
         res = await db.execute(stmt)
         sess = res.scalar_one_or_none()
@@ -135,69 +131,66 @@ async def Talking_with_Ollama_from_document(
         if sess is None:
             raise HTTPException(status_code=403, detail="ไม่พบ Session หรือคุณไม่มีสิทธิ์")
 
-        # -------------------------------------------------------
-        # STEP 2: ตรวจสอบสถานะ Channel (เข้าถึงผ่าน sess.channel ได้เลย)
-        # -------------------------------------------------------
-        # ถ้าเป็น Guest เข้าได้เฉพาะ Public Channel
-        if not current_user:
-             if sess.channel.status != RoleChannel.public:
-                 raise HTTPException(status_code=401, detail="Guest ใช้ได้เฉพาะ Public Channel เท่านั้น")
+        # STEP 2: ตรวจสอบ Channel
+        if not current_user and sess.channel.status != RoleChannel.public:
+            raise HTTPException(status_code=401, detail="Guest ใช้ได้เฉพาะ Public Channel เท่านั้น")
 
-        # -------------------------------------------------------
-        # STEP 3: Logic การบันทึกและตอบกลับ
-        # -------------------------------------------------------
-        sender_id = current_user.users_id if current_user else None
+        # STEP 3: กัน keyword ไร้สาระ
         keywords = ["ฟหก", "กหฟ", "หฟ", "ฟห", "กห", "ฟก"]
-        if any(keyword in payload.message for keyword in keywords):
-            return {
-                "user_message": {
-                    "chat_id": None,
-                    "message": payload.message,
-                    "created_at": None,
-                },
-                "ai_message": { 
-                    "message": "คุณพิมพ์อะไรมาเนี่ย? ลองใหม่อีกทีนะ!",
-                },
-                "token_usage": 0
-            }
-        
-        # 1. เรียก AI ก่อน
-        ai_messages = [{"role": "user", "content": payload.message}]
-        ai_result = await call_ai(ai_messages, sess.channel_id, sess.sessions_id)
+        if any(kw in payload.message for kw in keywords):
+            async def quick_reply():
+                yield f"data: {json.dumps({'token': 'คุณพิมพ์อะไรมาเนี่ย? ลองใหม่อีกทีนะ!'}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(quick_reply(), media_type="text/event-stream")
 
-        # 2. บันทึกทั้ง User Message และ AI Message ลงในแถวเดียว
-        new_chat = Chats(
-            channels_id=sess.channel_id,
-            users_id=sender_id,
-            sessions_id=sess.sessions_id,
-            user_message=payload.message,      # ใส่คำถาม
-            ai_message=ai_result["answer"],     # ใส่คำตอบ
-        )
-        db.add(new_chat)
-        await db.flush()
-        await db.refresh(new_chat)
+        sender_id = current_user.users_id if current_user else None
 
-        return {
-            "user_message": {
-                "chat_id": new_chat.chat_id,
-                "   ": new_chat.user_message,
-                "created_at": new_chat.created_at,
-            },
-            "ai_message": { 
-                "message": new_chat.ai_message,
-            },
-            "token_usage": ai_result["usage"]
-        }
+        # STEP 4: Stream generator
+        async def event_stream():
+            full_answer = ""
+            try:
+                async for token in rag_engine.astream_query(
+                    payload.message, sess.channel_id, sess.sessions_id
+                ):
+                    # ลบ <think> tags ระหว่าง stream (แบบง่าย)
+                    full_answer += token
+                    yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+
+                # หลัง stream จบ → บันทึก DB
+                clean_answer = rag_engine._strip_think(full_answer)
+
+                new_chat = Chats(
+                    channels_id=sess.channel_id,
+                    users_id=sender_id,
+                    sessions_id=sess.sessions_id,
+                    user_message=payload.message,
+                    ai_message=clean_answer,
+                )
+                db.add(new_chat)
+                await db.flush()
+                await db.refresh(new_chat)
+
+                # ส่ง metadata สุดท้าย
+                meta = {
+                    "done": True,
+                    "chat_id": new_chat.chat_id,
+                    "created_at": str(new_chat.created_at),
+                }
+                yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            except Exception as e:
+                logger.error(f"Stream error: {e}", exc_info=True)
+                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     except HTTPException as he:
-        logger.error(f"HTTPException: {he.detail}", exc_info=True)
         return JSONResponse(
             status_code=he.status_code,
-            content={"message": "แจ้ง backend ด้วยจ้า", "detail": he.detail}
+            content={"message": "แจ้ง backend ด้วยจ้า", "detail": he.detail},
         )
-    except Exception as e:
-        logger.error(f"Ollama Error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/sessions/{session_id}/history", response_model=List[chatHistoryItem], tags=["Chat & AI"])

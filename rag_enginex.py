@@ -2,7 +2,7 @@ from email.mime import text
 import os
 import re
 import logging
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, AsyncGenerator
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -44,7 +44,6 @@ from llama_index.core.chat_engine import CondensePlusContextChatEngine
 from pythainlp.tokenize import word_tokenize
 from llama_index.llms.openai_like import OpenAILike
 from llama_index.llms.gemini import Gemini
-
 
 from threading import RLock
 
@@ -108,9 +107,9 @@ class AppConfig:
     
     # Prompts
     SAFETY_SYSTEM_PROMPT: str = (
-        "เอาความรู้มาจากเอกสารที่มีเท่านั้น ถ้าไม่มีในเอกสารให้บอกว่า 'ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่มีอยู่ 😔' "
         "คุณคือผู้ช่วยอัจฉริยะที่ตอบคำถามอย่างสุภาพและชัดเจน "
         "หากผู้ใช้ถามสรุป ให้ลองพิจารณาข้อมูลจากส่วน metadata 'section_summary' หรือภาพรวมของเอกสารที่แนบมาด้วย"
+        "เอาความรู้มาจากเอกสารที่มีเท่านั้น ถ้าไม่มีในเอกสารให้บอกว่า 'ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่มีอยู่ 😔' ถ้ามีก็ไม่เป็นปัญหา"
     )
     
     MAX_CACHE_NODES: int = int(os.getenv("MAX_CACHE_NODES", "100000"))
@@ -669,7 +668,25 @@ class RAGService:
                 "usage": token_usage,
                 "sources": list(file_names)
             }
-            
+    
+
+    async def astream_query(
+        self,
+        question: str,
+        channel_id: Union[str, int],
+        sessions_id: Union[str, int, None] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Stream คำตอบแบบ token-by-token ผ่าน async generator"""
+        logger.info(f"Streaming query: [bold cyan]{question}[/] (Channel: {channel_id})")
+
+        chat_engine = self._get_chat_engine(str(channel_id), sessions_id)
+
+        # CondensePlusContextChatEngine รองรับ astream_chat
+        streaming_response = await chat_engine.astream_chat(question)
+
+        async for token in streaming_response.async_response_gen():
+            yield token
+    
     def debug_list_docs_by_channel(self, channel_id: int):
         """แสดงรายการเอกสารใน LanceDB สำหรับ channel ที่กำหนด"""
         try:
@@ -695,11 +712,40 @@ class RAGService:
 
 
 # ==========================================
-# 3. Global Instance (Eager Loading)
+# 3. Global Instance (Lazy Loading)
 # ==========================================
 
-try:
-    rag_engine = RAGService()
-except Exception as e:
-    logger.exception("Failed to initialize RAG Engine")
-    rag_engine = None
+class LazyRAGEngine:
+    def __init__(self):
+        self._engine: Optional[RAGService] = None
+        self._init_error: Optional[Exception] = None
+        self._lock = RLock()
+
+    def _get_engine(self) -> RAGService:
+        if self._engine is not None:
+            return self._engine
+
+        with self._lock:
+            if self._engine is not None:
+                return self._engine
+
+            if self._init_error is not None:
+                raise RuntimeError("RAG Engine initialization previously failed") from self._init_error
+
+            try:
+                self._engine = RAGService()
+            except Exception as e:
+                self._init_error = e
+                logger.exception("Failed to initialize RAG Engine")
+                raise
+
+        return self._engine
+
+    def __getattr__(self, item):
+        return getattr(self._get_engine(), item)
+
+    def is_ready(self) -> bool:
+        return self._engine is not None
+
+
+rag_engine = LazyRAGEngine()

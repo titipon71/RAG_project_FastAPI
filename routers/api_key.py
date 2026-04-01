@@ -145,12 +145,13 @@ async def list_api_keys(
 
         response = []
         for key in keys:
+            logger.debug(f"API Key | id={key.key_id} | name={key.name} | channel_id={key.channel_id} | channel_title={key.channel.title if key.channel else 'N/A'}")
             response.append(ApiKeyListResponse(
                 key_id=key.key_id,
                 name=key.name,
                 channel_id=encode_id(key.channel_id) if key.channel_id else None,
                 channel_name=key.channel.title if key.channel else "N/A",
-                channel_status=key.channel.status if key.channel else None,
+                channel_status=key.channel.status if key.channel else RoleChannel.private,
                 key_hint=key.key_hash if key.key_hash else "N/A",
                 created_at=key.created_at or datetime.now()
             ))
