@@ -14,11 +14,19 @@ from core.logging import apply_custom_logging
 import db.models
 # Routers
 from routers import account_type, auth, users, file_size, channels, files, session, events, statistics, api_key, utility
+from db.session import engine
+from contextlib import asynccontextmanager
 
 # ============================================================
 #                  APP INITIALIZATION
 # ============================================================
-app = FastAPI(title="KMUTNBLM (FastAPI + MariaDB + JWT)", openapi_tags=tags_metadata)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    apply_custom_logging()  # ย้ายมาจาก startup_event
+    yield
+    await engine.dispose()  # cleanup ตอนปิด
+    
+app = FastAPI(title="KMUTNBLM (FastAPI + MariaDB + JWT)", openapi_tags=tags_metadata, lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
 
 # ---------- Static Files ----------
@@ -51,7 +59,7 @@ app.include_router(api_key.router)
 app.include_router(utility.router)
 
 
-
+    
 # ---------- Startup Event ----------
 @app.on_event("startup")
 async def startup_event():

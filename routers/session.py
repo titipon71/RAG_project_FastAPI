@@ -148,13 +148,21 @@ async def Talking_with_Ollama_from_document(
         # STEP 4: Stream generator
         async def event_stream():
             full_answer = ""
+            stream_meta = {"sources": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
             try:
-                async for token in rag_engine.astream_query(
+                async for event in rag_engine.astream_query(
                     payload.message, sess.channel_id, sess.sessions_id
                 ):
-                    # ลบ <think> tags ระหว่าง stream (แบบง่าย)
-                    full_answer += token
-                    yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+                    if event.get("type") == "token":
+                        token = event.get("token", "")
+                        full_answer += token
+                        yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+                    elif event.get("type") == "meta":
+                        stream_meta = {
+                            "sources": event.get("sources", []),
+                            "usage": event.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
+                        }
+                        full_answer = event.get("answer", full_answer)
 
                 # หลัง stream จบ → บันทึก DB
                 clean_answer = rag_engine._strip_think(full_answer)
@@ -175,6 +183,8 @@ async def Talking_with_Ollama_from_document(
                     "done": True,
                     "chat_id": new_chat.chat_id,
                     "created_at": str(new_chat.created_at),
+                    "sources": stream_meta.get("sources", []),
+                    "usage": stream_meta.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
                 }
                 yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"

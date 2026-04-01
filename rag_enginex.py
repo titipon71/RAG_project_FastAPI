@@ -35,6 +35,7 @@ import lancedb
 from llama_index.core.callbacks.base_handler import BaseCallbackHandler
 from llama_index.core.callbacks.schema import CBEventType, EventPayload
 from llama_index.core.callbacks import CallbackManager
+from llama_index.core.callbacks.token_counting import get_tokens_from_response
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -139,25 +140,60 @@ class OllamaTokenHandler(BaseCallbackHandler):
         super().__init__(event_starts_to_ignore=[], event_ends_to_ignore=[])
         self.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
+    @staticmethod
+    def _to_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _build_usage(cls, prompt_tokens: Any, completion_tokens: Any, total_tokens: Any = None) -> Dict[str, int]:
+        p = cls._to_int(prompt_tokens)
+        c = cls._to_int(completion_tokens)
+        t = cls._to_int(total_tokens)
+        if t <= 0:
+            t = p + c
+        return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": t}
+
     def on_event_start(self, event_type, payload, event_id, **kwargs):
         pass  
 
     def on_event_end(self, event_type, payload, event_id, **kwargs):
-            if event_type == CBEventType.LLM:
-                response = payload.get(EventPayload.RESPONSE)
+        if event_type != CBEventType.LLM:
+            return
 
-                # Ollama path
-                if hasattr(response, "raw") and isinstance(response.raw, dict):
-                    p = response.raw.get("prompt_eval_count", 0)
-                    c = response.raw.get("eval_count", 0)
-                    self.latest_usage = {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
+        response = payload.get(EventPayload.RESPONSE)
+        if response is None:
+            return
 
-                # OpenAI-compatible path (OpenRouter)
-                elif hasattr(response, "raw") and hasattr(response.raw, "usage"):
-                    usage = response.raw.usage
-                    p = getattr(usage, "prompt_tokens", 0)
-                    c = getattr(usage, "completion_tokens", 0)
-                    self.latest_usage = {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
+        try:
+            p, c = get_tokens_from_response(response)
+            usage = self._build_usage(p, c)
+            if usage["total_tokens"] > 0:
+                self.latest_usage = usage
+                return
+        except Exception:
+            pass
+
+        raw = getattr(response, "raw", None)
+        if not isinstance(raw, dict):
+            return
+
+        usage_data = raw.get("usage", raw.get("usage_metadata", {}))
+        if isinstance(usage_data, dict):
+            usage = self._build_usage(
+                usage_data.get("prompt_tokens", usage_data.get("input_tokens", usage_data.get("prompt_token_count", 0))),
+                usage_data.get("completion_tokens", usage_data.get("output_tokens", usage_data.get("candidates_token_count", 0))),
+                usage_data.get("total_tokens", usage_data.get("total_token_count", 0)),
+            )
+            if usage["total_tokens"] > 0:
+                self.latest_usage = usage
+                return
+
+        usage = self._build_usage(raw.get("prompt_eval_count", 0), raw.get("eval_count", 0))
+        if usage["total_tokens"] > 0:
+            self.latest_usage = usage
     
     def start_trace(self, trace_id=None):
         pass
@@ -467,6 +503,78 @@ class RAGService:
         text = re.sub(r"(?i)(^|\n)\s*(analysis:|reasoning:|thoughts?:).*?(?=\n\n|\Z)", "", text, flags=re.DOTALL)
         return text.strip()
 
+    @staticmethod
+    def _build_usage_dict(prompt_tokens: Any, completion_tokens: Any, total_tokens: Any = None) -> Dict[str, int]:
+        try:
+            p = int(prompt_tokens or 0)
+        except (TypeError, ValueError):
+            p = 0
+        try:
+            c = int(completion_tokens or 0)
+        except (TypeError, ValueError):
+            c = 0
+        try:
+            t = int(total_tokens or 0)
+        except (TypeError, ValueError):
+            t = 0
+
+        if t <= 0:
+            t = p + c
+
+        return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": t}
+
+    def _resolve_usage(self, response: Any) -> Dict[str, int]:
+        usage = dict(self.token_handler.latest_usage)
+        if usage.get("total_tokens", 0) > 0:
+            return usage
+
+        if response is None:
+            return usage
+
+        try:
+            p, c = get_tokens_from_response(response)
+            usage = self._build_usage_dict(p, c)
+            if usage["total_tokens"] > 0:
+                return usage
+        except Exception:
+            pass
+
+        raw = getattr(response, "raw", None)
+        if isinstance(raw, dict):
+            usage_data = raw.get("usage", raw.get("usage_metadata", {}))
+            if isinstance(usage_data, dict):
+                usage = self._build_usage_dict(
+                    usage_data.get("prompt_tokens", usage_data.get("input_tokens", usage_data.get("prompt_token_count", 0))),
+                    usage_data.get("completion_tokens", usage_data.get("output_tokens", usage_data.get("candidates_token_count", 0))),
+                    usage_data.get("total_tokens", usage_data.get("total_token_count", 0)),
+                )
+                if usage["total_tokens"] > 0:
+                    return usage
+
+            usage = self._build_usage_dict(raw.get("prompt_eval_count", 0), raw.get("eval_count", 0))
+            if usage["total_tokens"] > 0:
+                return usage
+
+        return usage
+
+    def _extract_source_filenames(self, source_nodes: Optional[List[Any]]) -> List[str]:
+        if not source_nodes:
+            return []
+
+        file_names = set()
+        for source_node in source_nodes:
+            node = getattr(source_node, "node", source_node)
+            metadata = getattr(node, "metadata", {}) or {}
+            file_name = (
+                metadata.get("filename")
+                or metadata.get("file_name")
+                or metadata.get("source")
+            )
+            if file_name:
+                file_names.add(str(file_name))
+
+        return sorted(file_names)
+
     def _get_chat_engine(self, channel_id: str, session_id: Union[str, int, None]):
         user_key = str(session_id) if session_id else "global_guest"
         engine_key = f"{channel_id}_{user_key}"
@@ -637,37 +745,32 @@ class RAGService:
 
     
     async def aquery(self, question: str, channel_id: Union[str, int], sessions_id: Union[str, int, None] = None) -> Dict[str, Any]:
-            logger.info(f"Querying: [bold cyan]{question}[/] (Channel: {channel_id})")
-            self.token_handler.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            
-            chat_engine = self._get_chat_engine(str(channel_id), sessions_id)
+        logger.info(f"Querying: [bold cyan]{question}[/] (Channel: {channel_id})")
+        self.token_handler.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-            response = await chat_engine.achat(question)
-            
-            answer_text = self._strip_think(str(response))
-            token_usage = self.token_handler.latest_usage
-            
-            if not response.source_nodes:
-                logger.info("[yellow]No source nodes found.[/]")
-                return {
-                    "answer": "ตอนนี้ยังไม่มีเอกสารที่ใช้ตอบได้เลยนะ🤔 รบกวนเพิ่มเอกสารก่อนนะคะ😊",
-                    "usage": token_usage,
-                    "sources": []
-                }
+        chat_engine = self._get_chat_engine(str(channel_id), sessions_id)
+        response = await chat_engine.achat(question)
 
-            file_names = {
-                node.node.metadata.get("filename") 
-                for node in response.source_nodes 
-                if node.node.metadata.get("filename")
-            }
-            if file_names:
-                logger.info(f"Sources used: [green]{file_names}[/]")
+        answer_text = self._strip_think(str(response))
+        token_usage = self._resolve_usage(response)
 
+        if not response.source_nodes:
+            logger.info("[yellow]No source nodes found.[/]")
             return {
-                "answer": answer_text,
+                "answer": "ตอนนี้ยังไม่มีเอกสารที่ใช้ตอบได้เลยนะ🤔 รบกวนเพิ่มเอกสารก่อนนะคะ😊",
                 "usage": token_usage,
-                "sources": list(file_names)
+                "sources": [],
             }
+
+        file_names = self._extract_source_filenames(response.source_nodes)
+        if file_names:
+            logger.info(f"Sources used: [green]{file_names}[/]")
+
+        return {
+            "answer": answer_text,
+            "usage": token_usage,
+            "sources": file_names,
+        }
     
 
     async def astream_query(
@@ -675,17 +778,30 @@ class RAGService:
         question: str,
         channel_id: Union[str, int],
         sessions_id: Union[str, int, None] = None,
-    ) -> AsyncGenerator[str, None]:
-        """Stream คำตอบแบบ token-by-token ผ่าน async generator"""
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Stream คำตอบพร้อม metadata ตอนจบผ่าน async generator"""
         logger.info(f"Streaming query: [bold cyan]{question}[/] (Channel: {channel_id})")
+        self.token_handler.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         chat_engine = self._get_chat_engine(str(channel_id), sessions_id)
 
         # CondensePlusContextChatEngine รองรับ astream_chat
         streaming_response = await chat_engine.astream_chat(question)
+        full_answer = ""
 
         async for token in streaming_response.async_response_gen():
-            yield token
+            full_answer += token
+            yield {"type": "token", "token": token}
+
+        sources = self._extract_source_filenames(streaming_response.source_nodes)
+        usage = self._resolve_usage(streaming_response)
+
+        yield {
+            "type": "meta",
+            "answer": self._strip_think(full_answer),
+            "sources": sources,
+            "usage": usage,
+        }
     
     def debug_list_docs_by_channel(self, channel_id: int):
         """แสดงรายการเอกสารใน LanceDB สำหรับ channel ที่กำหนด"""
@@ -712,40 +828,11 @@ class RAGService:
 
 
 # ==========================================
-# 3. Global Instance (Lazy Loading)
+# 3. Global Instance (Eager Loading)
 # ==========================================
 
-class LazyRAGEngine:
-    def __init__(self):
-        self._engine: Optional[RAGService] = None
-        self._init_error: Optional[Exception] = None
-        self._lock = RLock()
-
-    def _get_engine(self) -> RAGService:
-        if self._engine is not None:
-            return self._engine
-
-        with self._lock:
-            if self._engine is not None:
-                return self._engine
-
-            if self._init_error is not None:
-                raise RuntimeError("RAG Engine initialization previously failed") from self._init_error
-
-            try:
-                self._engine = RAGService()
-            except Exception as e:
-                self._init_error = e
-                logger.exception("Failed to initialize RAG Engine")
-                raise
-
-        return self._engine
-
-    def __getattr__(self, item):
-        return getattr(self._get_engine(), item)
-
-    def is_ready(self) -> bool:
-        return self._engine is not None
-
-
-rag_engine = LazyRAGEngine()
+try:
+    rag_engine = RAGService()
+except Exception as e:
+    logger.exception("Failed to initialize RAG Engine")
+    rag_engine = None

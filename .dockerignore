@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+.git
+.ipynb_checkpoints
+test-*.py
+rag_engine_old_version.py
+rag_engine_for_terminal.py
+rag_enginex_qdrant.py
+cuda-check.py
+Hashids_demo.py
+# ถ้าไม่ต้องการเอาข้อมูลเก่าในเครื่องไปด้วย ให้ปลดคอมเมนต์ด้านล่าง
+storage/
+lancedb/
+file_storage/uploads/*

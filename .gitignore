@@ -25,6 +25,8 @@ Thumbs.db
 
 # Environment variables
 .env
+.env.docker
+
 
 # FastAPI specific (optional)
 *.db

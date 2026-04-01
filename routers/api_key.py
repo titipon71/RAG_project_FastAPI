@@ -1,7 +1,6 @@
 import logging
 import secrets
 import uuid
-import asyncio
 from datetime import datetime
 from typing import List, Tuple
 
@@ -286,11 +285,10 @@ async def public_chat_api(
         redis_session_key = f"api_temp:{uuid.uuid4()}"
 
     try:
-        result = await asyncio.to_thread(
-            rag_engine.aquery, 
-            question=last_user_msg, 
-            channel_id=real_channel_id, 
-            sessions_id=redis_session_key 
+        result = await rag_engine.aquery(
+            question=last_user_msg,
+            channel_id=real_channel_id,
+            sessions_id=redis_session_key,
         )
     except Exception as e:
         logger.error(f"RAG Error: {e}", exc_info=True)
@@ -309,5 +307,6 @@ async def public_chat_api(
             },
             "finish_reason": "stop"
         }],
-        "usage": result["usage"]
+        "usage": result["usage"],
+        "sources": result.get("sources", []),
     }
