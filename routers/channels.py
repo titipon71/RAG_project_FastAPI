@@ -797,7 +797,7 @@ async def list_my_channels(
         stmt = (
             select(Channel)
             .options(
-                joinedload(Channel.creator).joinedload(User.account_type_rel),                
+                selectinload(Channel.creator).selectinload(User.account_type_rel),                
                 selectinload(Channel.files) 
             )
             .where(Channel.created_by == current_user.users_id)

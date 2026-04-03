@@ -11,7 +11,7 @@ from sqlalchemy.orm import joinedload
 from core.enums import RoleChannel, RoleUser
 from core.hashids import decode_id
 from core.security import get_current_user, get_optional_current_user
-from db.session import get_db
+from db.session import SessionLocal, get_db
 from db.models.user import User
 from db.models.channel import Channel
 from db.models.session import Sessions
@@ -106,101 +106,89 @@ async def delete_session(
 @router.post("/sessions/ollama-reply", tags=["Chat & AI"])
 async def Talking_with_Ollama_from_document(
     payload: ChatRequest = Body(...),
-    db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_current_user),
 ):
-    try:
-        real_session_id = payload.sessions_id
-        if isinstance(real_session_id, str):
-            real_session_id = decode_id(real_session_id)
+    print(f"🔍 [1] Payload ID: {payload.sessions_id} (Type: {type(payload.sessions_id)})")
+    print(f"👤 [2] Current User: {current_user.users_id if current_user else 'Guest (None)'}")
 
-        # STEP 1: ค้นหา Session
+    # --- 1. เตรียมข้อมูลพื้นฐาน ---
+    async with SessionLocal() as db:
+        real_session_id = payload.sessions_id
+        
+        
+        print(f"🆔 [3] Decoded ID: {real_session_id}")
+
+        # สร้าง Query
         stmt = (
             select(Sessions)
             .options(joinedload(Sessions.channel))
             .where(Sessions.sessions_id == real_session_id)
         )
+
+        # DEBUG: เช็คเงื่อนไข User
         if current_user:
             stmt = stmt.where(Sessions.user_id == current_user.users_id)
+            logger.info(f"🔓 [3] User ID {current_user.users_id} is querying their session.")
+            print(f"⚓ [4] Query Mode: Registered User (ID: {current_user.users_id})")
         else:
             stmt = stmt.where(Sessions.user_id.is_(None))
+            logger.info("🔒 [3] Guest user is querying session.")
+            print(f"⚓ [4] Query Mode: Guest (User ID is NULL)")
 
         res = await db.execute(stmt)
         sess = res.scalar_one_or_none()
 
-        if sess is None:
+        if not sess:
+            # 🚨 จุดที่ทำให้เกิด 403
+            print(f"❌ [5] RESULT: Session NOT FOUND in DB (Check ID or Owner!)")
+            print("==================== DEBUG END =====================\n")
             raise HTTPException(status_code=403, detail="ไม่พบ Session หรือคุณไม่มีสิทธิ์")
 
-        # STEP 2: ตรวจสอบ Channel
-        if not current_user and sess.channel.status != RoleChannel.public:
-            raise HTTPException(status_code=401, detail="Guest ใช้ได้เฉพาะ Public Channel เท่านั้น")
+        print(f"✅ [5] RESULT: Session Found! (Channel ID: {sess.channel_id})")
+        
+        c_id = sess.channel_id
+        s_id = sess.sessions_id
+        u_id = current_user.users_id if current_user else None
+        is_public = sess.channel.status == RoleChannel.public
 
-        # STEP 3: กัน keyword ไร้สาระ
-        keywords = ["ฟหก", "กหฟ", "หฟ", "ฟห", "กห", "ฟก"]
-        if any(kw in payload.message for kw in keywords):
-            async def quick_reply():
-                yield f"data: {json.dumps({'token': 'คุณพิมพ์อะไรมาเนี่ย? ลองใหม่อีกทีนะ!'}, ensure_ascii=False)}\n\n"
-                yield "data: [DONE]\n\n"
-            return StreamingResponse(quick_reply(), media_type="text/event-stream")
-
-        sender_id = current_user.users_id if current_user else None
-
-        # STEP 4: Stream generator
-        async def event_stream():
-            full_answer = ""
-            stream_meta = {"sources": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
-            try:
-                async for event in rag_engine.astream_query(
-                    payload.message, sess.channel_id, sess.sessions_id
-                ):
-                    if event.get("type") == "token":
-                        token = event.get("token", "")
-                        full_answer += token
-                        yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
-                    elif event.get("type") == "meta":
-                        stream_meta = {
-                            "sources": event.get("sources", []),
-                            "usage": event.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
-                        }
-                        full_answer = event.get("answer", full_answer)
-
-                # หลัง stream จบ → บันทึก DB
-                clean_answer = rag_engine._strip_think(full_answer)
-
+    # --- 2. สร้าง Generator ---
+    async def event_stream():
+        print(f"🚀 [Stream] Started for Session: {s_id}")
+        full_answer = ""
+        try:
+            async for event in rag_engine.astream_query(payload.message, c_id, s_id):
+                if event.get("type") == "token":
+                    token = event.get("token", "")
+                    full_answer += token
+                    yield f"data: {json.dumps({'token': token}, ensure_ascii=False)}\n\n"
+            
+            print(f"💾 [Stream] Finished. Saving to DB...")
+            
+            async with SessionLocal() as db_context:
                 new_chat = Chats(
-                    channels_id=sess.channel_id,
-                    users_id=sender_id,
-                    sessions_id=sess.sessions_id,
+                    channels_id=c_id,
+                    users_id=u_id,
+                    sessions_id=s_id,
                     user_message=payload.message,
-                    ai_message=clean_answer,
+                    ai_message=rag_engine._strip_think(full_answer),
                 )
-                db.add(new_chat)
-                await db.flush()
-                await db.refresh(new_chat)
-
-                # ส่ง metadata สุดท้าย
-                meta = {
-                    "done": True,
-                    "chat_id": new_chat.chat_id,
-                    "created_at": str(new_chat.created_at),
-                    "sources": stream_meta.get("sources", []),
-                    "usage": stream_meta.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
-                }
-                yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
+                db_context.add(new_chat)
+                await db_context.commit()
+                print(f"✨ [Stream] Saved Successfully! Chat ID: {new_chat.chat_id}")
+                
+                yield f"data: {json.dumps({'done': True, 'chat_id': new_chat.chat_id}, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
 
-            except Exception as e:
-                logger.error(f"Stream error: {e}", exc_info=True)
-                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
-                yield "data: [DONE]\n\n"
+        except Exception as e:
+            print(f"💥 [Stream] ERROR: {str(e)}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield "data: [DONE]\n\n"
 
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+    print(f"==================== DEBUG END (Streaming Response Sent) =====================\n")
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-    except HTTPException as he:
-        return JSONResponse(
-            status_code=he.status_code,
-            content={"message": "แจ้ง backend ด้วยจ้า", "detail": he.detail},
-        )
+ 
+        
 
 
 @router.get("/sessions/{session_id}/history", response_model=List[chatHistoryItem], tags=["Chat & AI"])

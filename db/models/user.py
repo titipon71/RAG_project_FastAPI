@@ -23,9 +23,9 @@ class User(Base):
     active_at: Mapped[datetime] = mapped_column("active_at", server_default=func.current_timestamp(), onupdate=func.current_timestamp(), nullable=False)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)
 
-    channels = relationship("Channel", back_populates="creator")
-    uploaded_files = relationship("File", back_populates="uploader")
-    account_type_rel = relationship("AccountType", back_populates="users")
+    channels = relationship("Channel", back_populates="creator", lazy="raise")
+    uploaded_files = relationship("File", back_populates="uploader", lazy="raise")
+    account_type_rel = relationship("AccountType", back_populates="users", lazy="raise")
     
     def get_max_file_size(self) -> Optional[int]:
         # 🥇 Admin = unlimited

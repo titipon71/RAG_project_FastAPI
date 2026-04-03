@@ -60,10 +60,10 @@ app.include_router(utility.router)
 
 
     
-# ---------- Startup Event ----------
-@app.on_event("startup")
-async def startup_event():
-    apply_custom_logging()
+# # ---------- Startup Event ----------
+# @app.on_event("startup")
+# async def startup_event():
+#     apply_custom_logging()
 
 # ---------- Root / Docs ----------
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
