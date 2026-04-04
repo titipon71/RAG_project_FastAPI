@@ -16,7 +16,7 @@ engine = create_async_engine(
 
 # --- Debug: ติดตาม connection ที่ยังค้างอยู่ ---
         
-if True:
+if False:
     _checked_out = {}  # connection id → stack trace
 
     @event.listens_for(engine.sync_engine, "checkout")

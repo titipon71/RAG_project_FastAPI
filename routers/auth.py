@@ -7,6 +7,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from core.config import settings
 from core.enums import RoleUser, SSOLoginType
@@ -206,4 +207,67 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
             status_code=500,
             detail="Internal Server Error"
         )
+
+@router.post("/auth/mock-login", tags=["Authentication"])
+async def mock_login(db: AsyncSession = Depends(get_db)):
+    try:
+        mock_username = "s6512345678"
+        mock_name = "John Doe"
+        mock_account_type_name = "student"
+
+        try:
+            stmt = select(User).options(selectinload(User.account_type_rel)).where(User.username == mock_username)
+            result = await db.execute(stmt)
+            user = result.scalar_one_or_none()
+            account_type = await get_account_type(db, mock_account_type_name)
+
+            if not user:
+                new_user = User(
+                    username=mock_username,
+                    name=mock_name,
+                    hashed_password=mock_username,
+                    role=RoleUser.user,
+                    active_at=func.current_timestamp()
+                )
+                if account_type:
+                    new_user.account_type_rel = account_type
+
+                db.add(new_user)
+                await db.flush()
+
+            else:
+                if account_type:
+                    user.account_type_rel = account_type
+                user.active_at = func.current_timestamp()
+                await db.flush()
+
+            # ✅ Query ใหม่หลัง flush เสมอ เพื่อให้ได้ relationship ครบ
+            stmt = select(User).options(selectinload(User.account_type_rel)).where(User.username == mock_username)
+            result = await db.execute(stmt)
+            user = result.scalar_one()
+
+        except IntegrityError:
+            logger.warning(f"Duplicate mock user | username={mock_username}")
+            raise HTTPException(status_code=409, detail="ข้อมูลผู้ใช้ซ้ำกับที่มีในระบบ")
+
+        except SQLAlchemyError as e:
+            logger.error(f"Mock Login DB Error: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="เกิดข้อผิดพลาดในฐานข้อมูล")
+
+        return {
+            "message": "Mock login successful",
+            "user_id": user.users_id,
+            "username": user.username,
+            "name": user.name,
+            "account_type": user.account_type_rel.type_name if user.account_type_rel else None,
+            "local_access_token": create_access_token(data={"sub": str(user.users_id)}),
+            "sso_access_token": "mock_sso_access_token_abc123xyz"
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(f"Unexpected Mock Login Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
         

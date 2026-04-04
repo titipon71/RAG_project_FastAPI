@@ -17,8 +17,6 @@ from llama_index.core import (
     StorageContext,
     Document,
     Settings as LlamaSettings,
-    DocumentSummaryIndex,
-    get_response_synthesizer
 )
 from llama_index.core.node_parser import SemanticSplitterNodeParser
 from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
@@ -109,7 +107,6 @@ class AppConfig:
     # Prompts
     SAFETY_SYSTEM_PROMPT: str = (
         "คุณคือผู้ช่วยอัจฉริยะที่ตอบคำถามอย่างสุภาพและชัดเจน "
-        "หากผู้ใช้ถามสรุป ให้ลองพิจารณาข้อมูลจากส่วน metadata 'section_summary' หรือภาพรวมของเอกสารที่แนบมาด้วย"
         "เอาความรู้มาจากเอกสารที่มีเท่านั้น ถ้าไม่มีในเอกสารให้บอกว่า 'ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่มีอยู่ 😔' ถ้ามีก็ไม่เป็นปัญหา"
     )
     
@@ -263,23 +260,6 @@ class RAGService:
         # ✅ log แค่ครั้งเดียวตอนเสร็จ
         logger.info(f"nodes_cache size: {len(self.nodes_cache)} (+{len(nodes)} added)")
     
-    def _build_summary_nodes(self, docs: List[Document]) -> List[TextNode]:
-
-        response_synthesizer = get_response_synthesizer(
-            response_mode="tree_summarize",
-            use_async=False  # แก้ให้ตรงกับ sync context ด้วย
-        )
-
-        summary_index = DocumentSummaryIndex.from_documents(
-            docs,
-            llm=self.llm,
-            embed_model=self.embed_model,
-            response_synthesizer=response_synthesizer,
-            show_progress=True,
-        )
-
-        return list(summary_index.docstore.get_all_nodes())
-    
     def _init_models_parallel_sync(self):
         if config.USE_GEMINI:
             llm_label = f"Gemini/{config.GEMINI_MODEL}"
@@ -395,7 +375,7 @@ class RAGService:
 
     def _load_or_create_index(self) -> VectorStoreIndex:
         """
-        โหลดหรือสร้าง Index ใหม่ โดยเพิ่มความสามารถในการสรุปเอกสาร (DocumentSummaryIndex)
+        โหลดหรือสร้าง Index ใหม่ โดยแยกเอกสารเป็น nodes ปกติ
         """
         try:
             existing_tables = self.lance_db.table_names()
@@ -434,12 +414,8 @@ class RAGService:
                 logger.warning("No documents found. Returning an empty VectorStoreIndex.")
                 return VectorStoreIndex([], storage_context=self.storage_context, embed_model=self.embed_model)
 
-            # 3. สร้าง DocumentSummaryIndex (จุดที่ทำให้ RAG สรุปได้)
-            # ตัวนี้จะวิ่งไปสั่ง LLM สรุปแต่ละไฟล์เก็บไว้เป็น Metadata พิเศษ
-            logger.info("[bold yellow]Generating Document Summaries... (This may take a moment)[/]")
-            
-            # ดึง Nodes ทั้งหมดออกมา (ซึ่งตอนนี้จะมี Metadata สรุปติดมาด้วยแล้ว)
-            nodes = self._build_summary_nodes(documents)
+            logger.info("[bold yellow]Parsing documents into nodes...[/]")
+            nodes = self.node_parser.get_nodes_from_documents(documents)
 
             # 4. เก็บลง cache สำหรับ BM25
             if nodes:
@@ -651,13 +627,13 @@ class RAGService:
 
     def add_documents(self, docs: List[Document]):
         """
-        เพิ่มเอกสารใหม่ โดยมีการทำ Summary ก่อนเก็บลง Vector Index
+        เพิ่มเอกสารใหม่และแยกเป็น nodes ก่อนเก็บลง Vector Index
         """
         if not docs:
             logger.warning("No documents provided to add.")
             return
 
-        logger.info(f"Adding [bold]{len(docs)}[/] documents with Auto-Summary...")
+        logger.info(f"Adding [bold]{len(docs)}[/] documents...")
 
         # 1. เตรียม Metadata พื้นฐานสำหรับเอกสารใหม่
         for d in docs:
@@ -668,8 +644,8 @@ class RAGService:
 
         try:
      
-            # 3. ดึง Nodes ที่ถูกสรุปและจัดการ Metadata เรียบร้อยแล้วออกมา
-            new_nodes = self._build_summary_nodes(docs)  # แก้ให้ใช้เอกสารต้นฉบับที่มี metadata สรุปแล้ว
+            # แยกเอกสารเป็น nodes ด้วย parser ปกติ
+            new_nodes = self.node_parser.get_nodes_from_documents(docs)
 
             # 4. Insert nodes เหล่านี้ลงใน VectorStoreIndex หลัก (LanceDB)
             if new_nodes:
@@ -680,7 +656,7 @@ class RAGService:
                 with self.engine_lock:
                     self.chat_engines.clear()
                 
-                logger.info(f"[bold green]✅ Successfully added {len(new_nodes)} nodes with summaries to index.[/]")
+                logger.info(f"[bold green]✅ Successfully added {len(new_nodes)} nodes to index.[/]")
             else:
                 logger.warning("No nodes generated from the provided documents.")
 

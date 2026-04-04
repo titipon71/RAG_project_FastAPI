@@ -46,6 +46,8 @@ class UserRequestChannelStatusEventResponse(ORMBase):
     old_status: RoleChannel
     new_status: RoleChannel
     requested_by: int
+    is_user_read: bool = False
+    is_admin_read: bool = False
     decided_by: Optional[int] = None 
     decision: Optional[ModerationDecision] = None   
     decision_reason: Optional[str] = None

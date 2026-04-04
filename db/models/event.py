@@ -77,8 +77,23 @@ class ChannelStatusEvent(Base):
         nullable=True,
     )
     
-    is_read: Mapped[bool] = mapped_column(
-        "is_read",
+    is_user_read: Mapped[bool] = mapped_column(
+        "is_user_read",
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0"
+    )
+    is_admin_read: Mapped[bool] = mapped_column(
+        "is_admin_read",
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0"
+    )
+    
+    soft_delete: Mapped[bool] = mapped_column(
+        "soft_delete",
         Boolean,
         nullable=False,
         default=False,
