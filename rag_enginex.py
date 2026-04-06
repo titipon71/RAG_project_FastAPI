@@ -47,6 +47,10 @@ from llama_index.llms.gemini import Gemini
 from threading import RLock
 
 import torch
+
+# ✅ [STEP 2] Import SummaryWorker
+from summary_worker import SummaryWorker, SummaryWorkerConfig
+
 # ==========================================
 # 0. Logging Setup (Custom Colors)
 # ==========================================
@@ -102,7 +106,7 @@ class AppConfig:
     CONTEXT_WINDOW: int = 32768
     NUM_OUTPUT: int = 512
     TOP_K: int = 5
-    CHUNK_SIZE: int = 512 # สำหรับ Splitting
+    CHUNK_SIZE: int = 512
     
     # Prompts
     SAFETY_SYSTEM_PROMPT: str = (
@@ -112,7 +116,6 @@ class AppConfig:
     
     MAX_CACHE_NODES: int = int(os.getenv("MAX_CACHE_NODES", "100000"))
 
-    
     # === OpenRouter ===
     USE_OPENROUTER: bool = os.getenv("USE_OPENROUTER", "false").lower() == "true"
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
@@ -130,7 +133,7 @@ config = AppConfig()
 
 # ==========================================
 # 1. Callback Handler for Ollama Token Usage
-# =========================================
+# ==========================================
 
 class OllamaTokenHandler(BaseCallbackHandler):
     def __init__(self):
@@ -214,11 +217,9 @@ class RAGService:
         self.token_handler = OllamaTokenHandler()
         LlamaSettings.callback_manager = CallbackManager([self.token_handler])
 
-        # โหลด EmbedModel และ LLM พร้อมกัน แล้วค่อยสร้าง NodeParser
         logger.info("Loading models in parallel...")
         self._init_models_parallel_sync()
 
-        # ส่วนที่เหลือเหมือนเดิม
         logger.info("Connecting to [bright_blue]LanceDB...[/]")
         self.lance_db, self.vector_store = self._init_lancedb()
         self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
@@ -237,6 +238,21 @@ class RAGService:
             logger.error(f"[bold red]❌ Failed to connect to Redis:[/]\n{e}")
             raise e
 
+        # ✅ [STEP 2 — จุดที่ 1] Init และ start SummaryWorker หลัง Redis พร้อม
+        self.summary_worker = SummaryWorker(
+            llm=self.llm,
+            chat_store=self.chat_store,
+            nodes_lock=self.nodes_lock,
+            nodes_cache=self.nodes_cache,
+            cfg=SummaryWorkerConfig(
+                redis_ttl_seconds=60 * 60 * 24 * 7,   # 7 วัน
+                max_retries=3,
+                retry_delay_seconds=5.0,
+                max_queue_size=500,
+            ),
+        )
+        self.summary_worker.start()
+
         logger.info("[bold green]✅ RAG Service Ready![/]")
 
     def _add_nodes_to_cache(self, nodes):
@@ -250,14 +266,12 @@ class RAGService:
                     continue
                 self.nodes_cache[node_id] = node
 
-            # enforce size limit
             if len(self.nodes_cache) > config.MAX_CACHE_NODES:
                 overflow = len(self.nodes_cache) - config.MAX_CACHE_NODES
                 keys_to_remove = list(self.nodes_cache.keys())[:overflow]
                 for k in keys_to_remove:
                     del self.nodes_cache[k]
 
-        # ✅ log แค่ครั้งเดียวตอนเสร็จ
         logger.info(f"nodes_cache size: {len(self.nodes_cache)} (+{len(nodes)} added)")
     
     def _init_models_parallel_sync(self):
@@ -295,11 +309,9 @@ class RAGService:
     def _init_embed_model(self) -> HuggingFaceEmbedding:
         return HuggingFaceEmbedding(
             model_name=config.EMBED_MODEL_NAME,
-            device = "cuda" if torch.cuda.is_available() else "cpu" , # เปลี่ยนเป็น "cpu" ได้ถ้าเครื่องไม่มีการ์ดจอ
+            device="cuda" if torch.cuda.is_available() else "cpu",
             trust_remote_code=True
         )
-    
-    
 
     def _init_node_parser(self) -> SemanticSplitterNodeParser:
         return SemanticSplitterNodeParser.from_defaults(
@@ -327,7 +339,6 @@ class RAGService:
         )
     
     def _init_openrouter_llm(self):
-
         if not config.OPENROUTER_API_KEY:
             raise ValueError("OPENROUTER_API_KEY is not set in environment variables.")
 
@@ -365,7 +376,6 @@ class RAGService:
         )
 
     def _init_lancedb(self):
-        """เชื่อมต่อ LanceDB และสร้าง/โหลด Table"""
         db = lancedb.connect(config.LANCEDB_DIR)
         vector_store = LanceDBVectorStore(
             uri=config.LANCEDB_DIR,
@@ -374,36 +384,28 @@ class RAGService:
         return db, vector_store
 
     def _load_or_create_index(self) -> VectorStoreIndex:
-        """
-        โหลดหรือสร้าง Index ใหม่ โดยแยกเอกสารเป็น nodes ปกติ
-        """
         try:
             existing_tables = self.lance_db.table_names()
             if config.TABLE_NAME in existing_tables:
                 logger.info(f"Found existing LanceDB table: [green]{config.TABLE_NAME}[/]")
                 
-                # โหลด Vector Index เดิม
                 index = VectorStoreIndex.from_vector_store(
                     self.vector_store,
                     embed_model=self.embed_model,
                 )
                 
-                # โหลด nodes เข้า cache สำหรับ BM25
                 self._load_nodes_cache_from_lancedb()
                 return index
             else:
-                # ถ้าไม่เจอ Table ให้ข้ามไปที่ Exception เพื่อสร้างใหม่
                 raise ValueError(f"Table '{config.TABLE_NAME}' not found.")
                 
         except Exception as e:
             logger.warning(f"Creating new index because: {e}")
             logger.info("Reading documents from DATA_DIR...")
 
-            # 1. โหลดเอกสาร
             documents = []
             try:
                 documents = SimpleDirectoryReader(config.DATA_DIR).load_data()
-                # ใส่ metadata พื้นฐาน
                 for d in documents:
                     d.metadata = d.metadata or {}
                     d.metadata.setdefault("channel_id", "global")
@@ -417,11 +419,9 @@ class RAGService:
             logger.info("[bold yellow]Parsing documents into nodes...[/]")
             nodes = self.node_parser.get_nodes_from_documents(documents)
 
-            # 4. เก็บลง cache สำหรับ BM25
             if nodes:
                 self._add_nodes_to_cache(nodes)
 
-            # 5. สร้าง VectorStoreIndex ตัวหลักที่จะใช้ใน Chat Engine
             logger.info("Finalizing VectorStoreIndex...")
             return VectorStoreIndex(
                 nodes,
@@ -430,7 +430,6 @@ class RAGService:
             )
     
     def _load_nodes_cache_from_lancedb(self):
-        """โหลด nodes จาก LanceDB เข้า nodes_cache สำหรับ BM25"""
         try:
             table = self.lance_db.open_table(config.TABLE_NAME)
             rows = (
@@ -449,7 +448,6 @@ class RAGService:
             all_nodes = []
             for _, row in rows.iterrows():
                 metadata = row.get("metadata", {})
-                # LanceDB เก็บ metadata เป็น dict อยู่แล้ว
                 if isinstance(metadata, str):
                     import json
                     metadata = json.loads(metadata)
@@ -469,10 +467,8 @@ class RAGService:
         except Exception as e:
             logger.warning(f"[yellow]Could not load nodes cache from LanceDB: {e}[/]")
             logger.warning("[yellow]BM25 will start empty and fill up as documents are added.[/]")
-            # ไม่ raise — fallback gracefully ให้ BM25 เริ่มว่างได้
 
     def _strip_think(self, text: str) -> str:
-        """ลบข้อความส่วนที่ AI คิด (Chain of Thought) ออก"""
         if not text:
             return text
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -565,15 +561,12 @@ class RAGService:
             filters=[ExactMatchFilter(key="channel_id", value=str(channel_id))]
         )
 
-        # --- Vector retriever ---
         vector_retriever = self.index.as_retriever(
-            similarity_top_k=config.TOP_K * 2,  # ดึงเผื่อไว้ก่อน fusion จะเหลือ TOP_K
+            similarity_top_k=config.TOP_K * 2,
             filters=filters,
         )
 
-        # --- BM25 retriever (filter เฉพาะ nodes ของ channel นี้) ---
         with self.nodes_lock:
-
             channel_nodes = [
                 n
                 for n in self.nodes_cache.values()
@@ -589,16 +582,14 @@ class RAGService:
             retrievers = [vector_retriever, bm25_retriever]
             logger.info(f"Using hybrid retriever ({len(channel_nodes)} nodes in BM25)")
         else:
-            # ยังไม่มี nodes ใน cache → fallback ใช้ vector อย่างเดียว
             retrievers = [vector_retriever]
             logger.info("No nodes in cache yet, using vector-only retriever")
 
-        # --- Fusion (RRF merge) ---
         hybrid_retriever = QueryFusionRetriever(
             retrievers=retrievers,
             similarity_top_k=config.TOP_K,
-            num_queries=1,            # ไม่ generate query เพิ่ม ใช้คำถามเดิม
-            mode="reciprocal_rerank", # RRF
+            num_queries=1,
+            mode="reciprocal_rerank",
             use_async=True,
         )
 
@@ -635,28 +626,36 @@ class RAGService:
 
         logger.info(f"Adding [bold]{len(docs)}[/] documents...")
 
-        # 1. เตรียม Metadata พื้นฐานสำหรับเอกสารใหม่
         for d in docs:
             d.metadata = d.metadata or {}
-            # ตรวจสอบว่ามี channel_id หรือยัง ถ้าไม่มีให้ใส่ default
             if "channel_id" not in d.metadata:
                 d.metadata["channel_id"] = "global"
 
         try:
-     
-            # แยกเอกสารเป็น nodes ด้วย parser ปกติ
             new_nodes = self.node_parser.get_nodes_from_documents(docs)
 
-            # 4. Insert nodes เหล่านี้ลงใน VectorStoreIndex หลัก (LanceDB)
             if new_nodes:
                 self.index.insert_nodes(new_nodes)
                 self._add_nodes_to_cache(new_nodes)
                 
-                # 5. Clear chat_engines cache เพื่อให้การ Query ครั้งต่อไปเห็นข้อมูลใหม่
                 with self.engine_lock:
                     self.chat_engines.clear()
                 
                 logger.info(f"[bold green]✅ Successfully added {len(new_nodes)} nodes to index.[/]")
+
+                # ✅ [STEP 2 — จุดที่ 2] Enqueue summary job ต่อ 1 ไฟล์ หลัง insert เสร็จ
+                # รวบรวม (channel_id, file_name) ที่ไม่ซ้ำจากเอกสารที่เพิ่งเพิ่ม
+                files_added: set[tuple[str, str]] = {
+                    (
+                        str(d.metadata.get("channel_id", "global")),
+                        str(d.metadata.get("file_name", d.metadata.get("filename", "unknown"))),
+                    )
+                    for d in docs
+                }
+                for channel_id, file_name in files_added:
+                    self.summary_worker.enqueue(channel_id, file_name)
+                    logger.info(f"📥 Summary enqueued for: {file_name} (channel={channel_id})")
+
             else:
                 logger.warning("No nodes generated from the provided documents.")
 
@@ -673,9 +672,7 @@ class RAGService:
             table = self.lance_db.open_table(config.TABLE_NAME)
             table.delete(where_str)
 
-            # ← sync nodes_cache ด้วย
             with self.nodes_lock:
-
                 before = len(self.nodes_cache)
 
                 keys_to_delete = [
@@ -687,13 +684,41 @@ class RAGService:
                     )
                 ]
 
+                # ✅ [STEP 2 — จุดที่ 3] เก็บ (channel_id, file_name) ก่อนลบ nodes
+                # เพื่อนำไปลบ summary จาก Redis ด้านล่าง
+                deleted_files: set[tuple[str, str]] = {
+                    (
+                        str(self.nodes_cache[node_id].metadata.get("channel_id", "global")),
+                        str(self.nodes_cache[node_id].metadata.get("file_name", "unknown")),
+                    )
+                    for node_id in keys_to_delete
+                }
+
                 for k in keys_to_delete:
                     del self.nodes_cache[k]
 
                 removed = before - len(self.nodes_cache)
+
             logger.info(f"[bold green]✅ Delete successful. Removed {removed} nodes from cache.[/]")
 
-            # chat_engines ที่ build ไปแล้วอาจใช้ BM25 เก่า → clear cache
+            # ✅ [STEP 2 — จุดที่ 3 ต่อ] ลบ summary ออกจาก Redis แบบ fire-and-forget
+            import asyncio
+            for channel_id, file_name in deleted_files:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # เรียกจาก async context (FastAPI) → create_task ได้เลย
+                        asyncio.create_task(
+                            self.summary_worker.delete(channel_id, file_name)
+                        )
+                    else:
+                        # เรียกจาก sync context → run จนจบ
+                        loop.run_until_complete(
+                            self.summary_worker.delete(channel_id, file_name)
+                        )
+                except Exception as del_err:
+                    logger.warning(f"Could not delete summary for {file_name}: {del_err}")
+
             with self.engine_lock:
                 self.chat_engines.clear()
                 
@@ -719,11 +744,72 @@ class RAGService:
         except Exception as e:
             logger.error(f"[bold red]❌ Failed to clear history for {user_key}:[/]\n{e}")
 
-    
+    # ✅ [STEP 3] Pattern ตรวจ overview question — ปรับ keyword เพิ่มได้ตามต้องการ
+    _OVERVIEW_PATTERN = re.compile(
+        r"(สรุป|เกี่ยวกับอะไร|พูดถึงอะไร|ภาพรวม|มีอะไรบ้าง|overview|summary|เนื้อหาหลัก|ประเด็นหลัก|บอกเกี่ยวกับ|เอกสารนี้คืออะไร)",
+        re.IGNORECASE,
+    )
+
+    def _is_overview_question(self, question: str) -> bool:
+        return bool(self._OVERVIEW_PATTERN.search(question))
+
+    async def _build_summary_response(
+        self,
+        question: str,
+        channel_id: str,
+    ) -> Dict[str, Any] | None:
+        """
+        ดึง summary ทุกไฟล์ของ channel นี้จาก Redis แล้วให้ LLM ตอบ
+        คืน None ถ้าไม่มี summary พร้อมเลย (fallback ไป RAG ปกติ)
+        """
+        summaries: dict[str, str] = await self.summary_worker.get_all_for_channel(channel_id)
+
+        if not summaries:
+            logger.info("[yellow]No summaries ready yet, falling back to RAG[/]")
+            return None
+
+        # จัดรูป context: [ชื่อไฟล์]\nสรุป...
+        context_parts = [
+            f"[{file_name}]\n{summary_text}"
+            for file_name, summary_text in summaries.items()
+        ]
+        context = "\n\n---\n\n".join(context_parts)
+
+        prompt = (
+            f"จากสรุปเอกสารด้านล่าง จงตอบคำถามต่อไปนี้อย่างละเอียดเป็นภาษาไทย\n"
+            f"คำถาม: {question}\n\n"
+            f"[สรุปเอกสาร]\n{context}"
+        )
+
+        logger.info(f"📋 Overview route — using {len(summaries)} summary(s) from Redis")
+        raw = await self.llm.acomplete(prompt)
+        answer = self._strip_think(str(raw))
+        usage = self._resolve_usage(raw)
+
+        return {
+            "answer": answer,
+            "usage": usage,
+            "sources": sorted(summaries.keys()),
+            "from_summary": True,   # ← ให้ API layer รู้ว่ามาจาก summary cache
+        }
+
     async def aquery(self, question: str, channel_id: Union[str, int], sessions_id: Union[str, int, None] = None) -> Dict[str, Any]:
         logger.info(f"Querying: [bold cyan]{question}[/] (Channel: {channel_id})")
         self.token_handler.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
+        # ✅ [STEP 3] Overview routing — ถ้าเป็นคำถาม overview ให้ใช้ summary จาก Redis ก่อน
+        if self._is_overview_question(question):
+            logger.info("[bold magenta]ROUTE (query): SUMMARY[/] — overview question detected")
+            summary_result = await self._build_summary_response(question, str(channel_id))
+            if summary_result:
+                logger.info("[bold magenta]ROUTE SELECTED (query): SUMMARY[/] — answered from summary cache")
+                return summary_result
+            # summary ยังไม่พร้อม → fall through ไป RAG ปกติด้านล่าง
+            logger.info("[bold yellow]ROUTE FALLBACK (query): RAG HYBRID[/] — summary not ready")
+        else:
+            logger.info("[bold cyan]ROUTE SELECTED (query): RAG HYBRID[/] — non-overview question")
+
+        logger.info("[bold cyan]Using normal RAG retrieval pipeline (hybrid retrieval)[/]")
         chat_engine = self._get_chat_engine(str(channel_id), sessions_id)
         response = await chat_engine.achat(question)
 
@@ -747,7 +833,6 @@ class RAGService:
             "usage": token_usage,
             "sources": file_names,
         }
-    
 
     async def astream_query(
         self,
@@ -755,13 +840,34 @@ class RAGService:
         channel_id: Union[str, int],
         sessions_id: Union[str, int, None] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Stream คำตอบพร้อม metadata ตอนจบผ่าน async generator"""
         logger.info(f"Streaming query: [bold cyan]{question}[/] (Channel: {channel_id})")
         self.token_handler.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
+        # ✅ [STEP 3] Overview routing สำหรับ streaming
+        if self._is_overview_question(question):
+            logger.info("[bold magenta]ROUTE (stream): SUMMARY[/] — overview question detected")
+            summary_result = await self._build_summary_response(question, str(channel_id))
+            if summary_result:
+                logger.info("[bold magenta]ROUTE SELECTED (stream): SUMMARY[/] — answered from summary cache")
+                # จำลอง stream ทีละ token เพื่อให้ client ไม่ต้องแยก code path
+                for token in summary_result["answer"]:
+                    yield {"type": "token", "token": token}
+                yield {
+                    "type": "meta",
+                    "answer": summary_result["answer"],
+                    "sources": summary_result["sources"],
+                    "usage": summary_result["usage"],
+                    "from_summary": True,
+                }
+                return
+            # summary ยังไม่พร้อม → fall through ไป RAG ปกติด้านล่าง
+            logger.info("[bold yellow]ROUTE FALLBACK (stream): RAG HYBRID[/] — summary not ready")
+        else:
+            logger.info("[bold cyan]ROUTE SELECTED (stream): RAG HYBRID[/] — non-overview question")
+
+        logger.info("[bold cyan]Using normal RAG retrieval pipeline (hybrid retrieval) for streaming[/]")
         chat_engine = self._get_chat_engine(str(channel_id), sessions_id)
 
-        # CondensePlusContextChatEngine รองรับ astream_chat
         streaming_response = await chat_engine.astream_chat(question)
         full_answer = ""
 
@@ -780,10 +886,8 @@ class RAGService:
         }
     
     def debug_list_docs_by_channel(self, channel_id: int):
-        """แสดงรายการเอกสารใน LanceDB สำหรับ channel ที่กำหนด"""
         try:
             table = self.lance_db.open_table(config.TABLE_NAME)
-            # LanceDB ใช้ SQL filter แทน where dict ของ ChromaDB
             results = table.search().where(f"channel_id = '{channel_id}'").to_list()
             
             print(f"[DEBUG] LanceDB docs for channel {channel_id}")
