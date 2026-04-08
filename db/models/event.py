@@ -109,7 +109,15 @@ class ChannelStatusEvent(Base):
         "decided_at",
         nullable=True,
     )
-
+    
+    updated_at: Mapped[datetime] = mapped_column(
+        "updated_at",
+        server_default=func.current_timestamp(),
+        nullable=False,
+        onupdate=func.current_timestamp(),
+    )
+    updated_at: Mapped[datetime] = mapped_column("updated_at", server_default=func.current_timestamp(), onupdate=func.current_timestamp(), nullable=False)
+    
     channel = relationship("Channel", back_populates="status_events")
     requester = relationship("User", foreign_keys=[requested_by])
     approver  = relationship("User", foreign_keys=[decided_by])

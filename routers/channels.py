@@ -21,6 +21,7 @@ from core.config import settings
 from core.enums import RoleChannel, ModerationDecision, RoleUser
 from core.hashids import encode_id, decode_id
 from core.security import get_current_user
+from core.sse_manager import sse_manager
 from db.models.account_type import AccountType
 from db.session import get_db
 from db.models.user import User
@@ -87,6 +88,57 @@ async def _save_upload_atomic(uf: UploadFile, final_path: pathlib.Path, max_size
     # replace แบบ atomic
     os.replace(tmp_path, final_path)
     return size_bytes
+
+
+async def _get_admin_user_ids(db: AsyncSession) -> list[int]:
+    result = await db.execute(select(User.users_id).where(User.role == RoleUser.admin))
+    return [row[0] for row in result.all()]
+
+
+async def _notify_event_users(
+    db: AsyncSession,
+    channel: Channel,
+    event: ChannelStatusEvent,
+    include_admins: bool = True,
+) -> None:
+    """Broadcast SSE notification to admins and users related to this event."""
+    target_user_ids = {
+        channel.created_by,
+        event.requested_by,
+        event.decided_by,
+    }
+
+    if include_admins:
+        admin_ids = set(await _get_admin_user_ids(db))
+        for admin_id in admin_ids:
+            target_user_ids.add(admin_id)
+
+    target_user_ids = {uid for uid in target_user_ids if uid is not None}
+    payload = {
+        "event_id": event.event_id,
+        "channel_id": channel.channels_id,
+        "channel_title": channel.title,
+        "old_status": event.old_status,
+        "new_status": event.new_status,
+        "requested_by": event.requested_by,
+        "decided_by": event.decided_by,
+        "decision": event.decision,
+        "decision_reason": event.decision_reason,
+        "created_at": event.created_at,
+        "updated_at": event.updated_at,
+        "decided_at": event.decided_at,
+        "is_user_read": event.is_user_read,
+        "is_admin_read": event.is_admin_read,
+    }
+
+    for target_user_id in target_user_ids:
+        try:
+            await sse_manager.push(target_user_id, payload)
+        except Exception:
+            logger.warning(
+                f"Unable to push SSE notification to user_id={target_user_id}",
+                exc_info=True,
+            )
 
 
 # ============================================================
@@ -313,11 +365,13 @@ async def request_make_public(
         new_status=RoleChannel.public,
         requested_by=current_user.users_id,
         decision=None,
+        is_user_read=False,
     )
     db.add(event)
     await db.flush()
     await db.refresh(channel)
     await db.refresh(event)
+    await _notify_event_users(db, channel, event)
 
     return ModerationResponse(
         channels_id=channel.channels_id,
@@ -362,15 +416,35 @@ async def cancel_request_make_public(
 
     if not pending_event:
         # กรณี Data หลุด (channel เป็น pending แต่หา event ไม่เจอ)
-        # ให้ force update channel กลับเป็น private ได้เลย แต่แจ้งเตือนหน่อย
+        # ให้ force update channel กลับเป็น private และสร้าง event ใหม่เพื่อแจ้งเตือน user
+        now = datetime.now(timezone.utc)
         channel.status = RoleChannel.private
-        await db.flush()
-        return ModerationResponse(
-            channels_id=channel_id,
-            old_status=RoleChannel.pending, # สมมติ
+
+        recovery_event = ChannelStatusEvent(
+            channel_id=channel.channels_id,
+            old_status=RoleChannel.pending,
             new_status=RoleChannel.private,
-            event_id=0,
-            message="Status reverted (Event log not found)."
+            requested_by=current_user.users_id,
+            decided_by=current_user.users_id,
+            decision=ModerationDecision.rejected,
+            decision_reason="Cancelled by user (recovery: pending event missing)",
+            is_user_read=False,
+            created_at=now,
+            decided_at=now,
+        )
+        db.add(recovery_event)
+
+        await db.flush()
+        await db.refresh(channel)
+        await db.refresh(recovery_event)
+        await _notify_event_users(db, channel, recovery_event)
+
+        return ModerationResponse(
+            channels_id=channel.channels_id,
+            old_status=RoleChannel.pending,
+            new_status=channel.status,
+            event_id=recovery_event.event_id,
+            message="Request cancelled. Channel reverted to private (recovery event created)."
         )
 
     # 6) --- [จุดสำคัญ] Update Event เดิม แทนการสร้างใหม่ ---
@@ -381,6 +455,7 @@ async def cancel_request_make_public(
     pending_event.decision = ModerationDecision.rejected # ใช้ rejected ในความหมายว่า "คำขอตกไป"
     pending_event.decision_reason = "Cancelled by user" # ใส่เหตุผลให้ชัดเจน
     pending_event.decided_at = now
+    pending_event.is_user_read = False
     
     # 7) เปลี่ยนสถานะ Channel กลับ
     old_status_msg = channel.status
@@ -389,6 +464,7 @@ async def cancel_request_make_public(
     await db.flush()
     await db.refresh(channel)
     await db.refresh(pending_event)
+    await _notify_event_users(db, channel, pending_event)
 
     return ModerationResponse(
         channels_id=channel.channels_id,
@@ -428,6 +504,13 @@ async def approved_rejected_public_request(
             status_code=409, 
             detail="คำขอนี้ถูกดำเนินการไปแล้วโดย Admin คนอื่น"
         )
+
+    logger.info(
+        "Channel moderation action mode=moderate channel_id=%s admin_id=%s approve=%s",
+        decoded_channel_id,
+        current_user.users_id,
+        payload.approve,
+    )
     
     now =  datetime.now(timezone.utc)
     
@@ -444,10 +527,12 @@ async def approved_rejected_public_request(
     event_table.decided_by = current_user.users_id
     event_table.decided_at = now
     event_table.decision_reason = reason
+    event_table.is_user_read = False
 
     await db.flush()
     await db.refresh(channel)
     await db.refresh(event_table)
+    await _notify_event_users(db, channel, event_table)
 
     return AdminDecisionOut(
         channels_id=channel.channels_id,
@@ -466,48 +551,97 @@ async def admin_forced_this_channel_to_be_public(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # 1. Check Admin Permission
     if current_user.role != RoleUser.admin:
         raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
-    
-    # 2. Get Channel
+
     real_channel_id = decode_id(channel_id)
     if real_channel_id is None:
         raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
-    res = await db.execute(select(Channel).where(Channel.channels_id == real_channel_id))
+
+    res = await db.execute(
+        select(Channel)
+        .where(Channel.channels_id == real_channel_id)
+        .with_for_update()  # ← เพิ่มเพื่อกัน race condition
+    )
     channel = res.scalar_one_or_none()
     if not channel:
         raise HTTPException(status_code=404, detail="ไม่พบ Channel")
-    
-    # 3. Validation: ทำได้เฉพาะช่องที่เป็น Public หรือ Pending เท่านั้น
-    if channel.status != RoleChannel.private and channel.status != RoleChannel.pending:
-        raise HTTPException(status_code=400, detail="Channel เป็นส่วนตัวแล้ว")
-    # เก็บสถานะเดิมไว้ทำ Log
-    old_status = channel.status
-    now = datetime.now(timezone.utc)
-    reason = payload.reason or "Admin forced channel to PUBLIC."
 
-    # 4. Action: เปลี่ยนสถานะเป็น Public
+    if channel.status == RoleChannel.public:
+        raise HTTPException(status_code=400, detail="Channel เป็นสาธารณะอยู่แล้ว")
+
+    now = datetime.now(timezone.utc)
+    reason = payload.reason or "Admin approved channel to PUBLIC."
+
+    logger.info(
+        "Channel moderation action mode=force_public channel_id=%s admin_id=%s current_status=%s",
+        real_channel_id,
+        current_user.users_id,
+        channel.status,
+    )
+
+    # ── กรณี 1: channel กำลัง pending → เดิน moderate flow ───────────────
+    if channel.status == RoleChannel.pending:
+        pending_event = await get_latest_pending_event(db, real_channel_id)
+
+        if pending_event and pending_event.decision is None:
+            channel.status = RoleChannel.public
+            pending_event.decision    = ModerationDecision.approved
+            pending_event.decided_by  = current_user.users_id
+            pending_event.decided_at  = now
+            pending_event.decision_reason = reason
+            pending_event.is_user_read = False
+
+            await db.flush()
+            await db.refresh(channel)
+            await db.refresh(pending_event)
+            await _notify_event_users(db, channel, pending_event)
+
+            logger.info(
+                "Channel moderation action mode=force_public flow=moderate_pending_event channel_id=%s admin_id=%s event_id=%s",
+                real_channel_id,
+                current_user.users_id,
+                pending_event.event_id,
+            )
+
+            return AdminDecisionOut(
+                channels_id=channel.channels_id,
+                decision=pending_event.decision,
+                status_after=channel.status,
+                event_id=pending_event.event_id,
+                decided_by=pending_event.decided_by,
+                decided_at=pending_event.decided_at,
+                message=reason,
+            )
+
+    # ── กรณี 2: channel เป็น private → force โดยสร้าง event ใหม่ ──────────
+    old_status = channel.status
     channel.status = RoleChannel.public
-    
-    # 5. Create NEW Event Log
-    # เราสร้าง Event ใหม่เลย เพราะนี่คือการกระทำใหม่จาก Admin (ไม่ใช่การอนุมัติคำขอเก่า)
+
     event = ChannelStatusEvent(
         channel_id=channel.channels_id,
         old_status=old_status,
         new_status=RoleChannel.public,
-        requested_by=current_user.users_id, # Admin เป็นคนเริ่ม
-        decided_by=current_user.users_id,   # Admin เป็นคนตัดสิน
+        requested_by=current_user.users_id,
+        decided_by=current_user.users_id,
         decision=ModerationDecision.approved,
         decision_reason=reason,
+        is_user_read=False,
         created_at=now,
-        decided_at=now
+        decided_at=now,
     )
-
     db.add(event)
     await db.flush()
     await db.refresh(channel)
     await db.refresh(event)
+    await _notify_event_users(db, channel, event)
+
+    logger.info(
+        "Channel moderation action mode=force_public flow=create_new_event channel_id=%s admin_id=%s event_id=%s",
+        real_channel_id,
+        current_user.users_id,
+        event.event_id,
+    )
 
     return AdminDecisionOut(
         channels_id=channel.channels_id,
@@ -548,6 +682,13 @@ async def admin_forced_this_channel_to_be_private(
     now = datetime.now(timezone.utc)
     reason = payload.reason or "Admin forced channel to PRIVATE."
 
+    logger.info(
+        "Channel moderation action mode=force_private channel_id=%s admin_id=%s old_status=%s",
+        real_channel_id,
+        current_user.users_id,
+        old_status,
+    )
+
     # 4. Action: เปลี่ยนสถานะเป็น Private
     channel.status = RoleChannel.private
     
@@ -561,6 +702,7 @@ async def admin_forced_this_channel_to_be_private(
         decided_by=current_user.users_id,   # Admin เป็นคนตัดสิน
         decision=ModerationDecision.approved,
         decision_reason=reason,
+        is_user_read=False,
         created_at=now,
         decided_at=now
     )
@@ -569,6 +711,7 @@ async def admin_forced_this_channel_to_be_private(
     await db.flush()
     await db.refresh(channel)
     await db.refresh(event)
+    await _notify_event_users(db, channel, event)
 
     return AdminDecisionOut(
         channels_id=channel.channels_id,
@@ -613,6 +756,7 @@ async def owner_set_this_channel_private(
         decided_by=current_user.users_id,
         decision=ModerationDecision.approved, # ถือว่าอนุมัติทันทีโดยเจ้าของ
         decision_reason="Changed to private by owner",
+        is_user_read=False,
         decided_at=datetime.now(timezone.utc)
     )
     db.add(event)
@@ -620,6 +764,7 @@ async def owner_set_this_channel_private(
     await db.flush()
     await db.refresh(channel)
     await db.refresh(event)
+
 
     return ModerationResponse(
         channels_id=channel.channels_id,

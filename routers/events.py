@@ -6,11 +6,11 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status, Request
 from fastapi.responses import StreamingResponse
 from jose import JWTError, jwt
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from core import sse_manager
+from core.sse_manager import sse_manager
 from core.enums import RoleUser
 from core.security import get_current_user
 from db.session import get_db
@@ -48,6 +48,8 @@ async def get_channel_status_events_by_user(
             detail="ไม่มีสิทธิ์ดำเนินการเพื่อดูเหตุการณ์เหล่านี้"
         )
 
+    is_admin_view = current_user.role == RoleUser.admin
+
     try:
         # --- เริ่มส่วนที่อาจเกิด Error (เช่น DB connection, Query ผิด) ---
         
@@ -55,12 +57,14 @@ async def get_channel_status_events_by_user(
         stmt = (
             select(ChannelStatusEvent)
             .options(selectinload(ChannelStatusEvent.channel))
-            .where(ChannelStatusEvent.requested_by == user_id)
             .where(ChannelStatusEvent.soft_delete == False)
-            .order_by(ChannelStatusEvent.created_at.desc())
+            .order_by(ChannelStatusEvent.updated_at.desc())
             .offset(skip)
             .limit(limit)
         )
+
+        if not is_admin_view:
+            stmt = stmt.where(ChannelStatusEvent.requested_by == user_id)
         
         result = await db.execute(stmt)
         events = result.scalars().all()
@@ -68,6 +72,11 @@ async def get_channel_status_events_by_user(
         # แปลงข้อมูล
         event_list = []
         for ev in events:
+            
+            logger.debug(f"decided_at={ev.decided_at!r} type={type(ev.decided_at)}")
+            logger.debug(f"created_at={ev.created_at!r} type={type(ev.created_at)}")
+            logger.debug(f"updated_at={ev.updated_at!r} type={type(ev.updated_at)}")           
+            
             response_item = UserRequestChannelStatusEventResponse(
                 event_id=ev.event_id,
                 channel_id=ev.channel_id,
@@ -79,8 +88,9 @@ async def get_channel_status_events_by_user(
                 decision=ev.decision,
                 decision_reason=ev.decision_reason,
                 created_at=ev.created_at,
+                updated_at=ev.updated_at,
                 decided_at=ev.decided_at,
-                is_read=ev.is_user_read,
+                is_user_read=ev.is_user_read,
                 is_admin_read=ev.is_admin_read,
             )
             event_list.append(response_item)
@@ -116,63 +126,66 @@ def get_user_id_from_token(token: str) -> int:
 
 
 # ✅ SSE endpoint
-# @router.get("/events/stream/{user_id}", tags=["Events & Moderation"])
-# async def stream_notifications(
-#     request: Request,
-#     user_id: int = Path(...),
-#     token: str = Query(...),  # 👈 รับ token จาก query
-# ):
-#     print("=== SSE CONNECT ===")
-#     print("user_id:", user_id)
-#     print("query:", dict(request.query_params))
-#     print("===================")
+@router.get("/events/stream/{user_id}", tags=["Events & Moderation"])
+async def stream_notifications(
+    request: Request,
+    user_id: int = Path(...),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        print("=== SSE CONNECT ===")
+        print("user_id:", user_id)
+        print("===================")
 
-#     # 🔐 auth
-#     current_user_id = get_user_id_from_token(token)
+        if current_user.users_id != user_id:
+            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์")
 
-#     # 🔒 authorization
-#     if current_user_id != user_id:
-#         raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์")
+        async def event_generator():
+            q = sse_manager.connect(user_id)
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        print(f"Client disconnected: user_id={user_id}")
+                        break
+                    try:
+                        data = await asyncio.wait_for(q.get(), timeout=30.0)
+                        yield (
+                            "event: notification\n"
+                            f"data: {data}\n\n"
+                        )
+                    except asyncio.TimeoutError:
+                        yield "event: ping\ndata: {}\n\n"
+            except asyncio.CancelledError:
+                print(f"Cancelled: user_id={user_id}")
+            except Exception as e:
+                logger.error(
+                    f"Unexpected SSE stream error for user_id={user_id}: {str(e)}",
+                    exc_info=True,
+                )
+            finally:
+                sse_manager.disconnect(user_id, q)
+                print(f"Disconnected cleanup: user_id={user_id}")
 
-#     async def event_generator():
-#         q = sse_manager.connect(user_id)
-
-#         try:
-#             while True:
-#                 # ❌ client ปิด connection หรือยัง
-#                 if await request.is_disconnected():
-#                     print(f"Client disconnected: user_id={user_id}")
-#                     break
-
-#                 try:
-#                     # ⏳ รอ event 30 วิ
-#                     data = await asyncio.wait_for(q.get(), timeout=30.0)
-
-#                     yield (
-#                         "event: notification\n"
-#                         f"data: {data}\n\n"
-#                     )
-
-#                 except asyncio.TimeoutError:
-#                     # 💓 heartbeat กัน connection ตาย
-#                     yield "event: ping\ndata: {}\n\n"
-
-#         except asyncio.CancelledError:
-#             print(f"Cancelled: user_id={user_id}")
-
-#         finally:
-#             sse_manager.disconnect(user_id, q)
-#             print(f"Disconnected cleanup: user_id={user_id}")
-
-#     return StreamingResponse(
-#         event_generator(),
-#         media_type="text/event-stream",
-#         headers={
-#             "Cache-Control": "no-cache",
-#             "Connection": "keep-alive",
-#             "X-Accel-Buffering": "no",  # สำคัญถ้าใช้ Nginx
-#         },
-#     )
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Error initializing SSE stream for user_id={user_id}: {str(e)}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="เกิดข้อผิดพลาดภายในระบบ ไม่สามารถเชื่อมต่อการแจ้งเตือนได้ในขณะนี้"
+        )
     
 @router.post("/events/read", status_code=204, tags=["Events & Moderation"])
 async def events_as_read(
@@ -189,14 +202,22 @@ async def events_as_read(
                 update(ChannelStatusEvent)
                 .where(ChannelStatusEvent.event_id == payload.event_id)
                 .where(ChannelStatusEvent.requested_by == current_user.users_id)
-                .values(is_user_read=True) 
+                .values(
+                    is_user_read=True,
+                    updated_at=func.current_timestamp(),
+                )
             )        
         elif payload.type == "admin":
+            if current_user.role != RoleUser.admin:
+                raise HTTPException(status_code=403, detail="Admin only")
+
             stmt = (
                 update(ChannelStatusEvent)
                 .where(ChannelStatusEvent.event_id == payload.event_id)
-                .where(ChannelStatusEvent.requested_by == current_user.users_id)
-                .values(is_admin_read=True) 
+                .values(
+                    is_admin_read=True,
+                    updated_at=func.current_timestamp(),
+                )
             )
         
         result = await db.execute(stmt)
@@ -207,6 +228,9 @@ async def events_as_read(
             raise HTTPException(status_code=404, detail="Event not found")
             
         print("DEBUG: Update successful!")
+
+    except HTTPException:
+        raise
         
     except Exception as e:
         # พิมพ์ Error ออกมาดู
@@ -229,7 +253,10 @@ async def events_soft_delete(
             .where(ChannelStatusEvent.event_id == payload.event_id)
             .where(ChannelStatusEvent.requested_by == current_user.users_id)
             .where(ChannelStatusEvent.soft_delete == False)
-            .values(soft_delete=True)
+            .values(
+                soft_delete=True,
+                updated_at=func.current_timestamp(),
+            )
         )
 
         result = await db.execute(stmt)
