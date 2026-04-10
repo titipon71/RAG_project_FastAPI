@@ -622,7 +622,7 @@ async def admin_forced_this_channel_to_be_public(
         channel_id=channel.channels_id,
         old_status=old_status,
         new_status=RoleChannel.public,
-        requested_by=current_user.users_id,
+        requested_by=channel.created_by,  # อาจจะไม่มีผู้ขอจริงๆ เพราะนี่คือการบังคับโดย Admin
         decided_by=current_user.users_id,
         decision=ModerationDecision.approved,
         decision_reason=reason,
@@ -698,7 +698,7 @@ async def admin_forced_this_channel_to_be_private(
         channel_id=channel.channels_id,
         old_status=old_status,
         new_status=RoleChannel.private,
-        requested_by=current_user.users_id, # Admin เป็นคนเริ่ม
+        requested_by=channel.created_by,  # อาจจะไม่มีผู้ขอจริงๆ เพราะนี่คือการบังคับโดย Admin
         decided_by=current_user.users_id,   # Admin เป็นคนตัดสิน
         decision=ModerationDecision.approved,
         decision_reason=reason,

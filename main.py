@@ -16,15 +16,35 @@ import db.models
 from routers import account_type, auth, users, file_size, channels, files, session, events, statistics, api_key, utility
 from db.session import engine
 from contextlib import asynccontextmanager
+from rag_enginex import rag_engine
 
 # ============================================================
 #                  APP INITIALIZATION
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    apply_custom_logging()  # ย้ายมาจาก startup_event
+    apply_custom_logging()
+    logger = logging.getLogger("uvicorn.error")
+    
+    # ── Startup ──
+    logger.info("Starting up...")
+    if rag_engine:
+        rag_engine.summary_worker.start()
+        logger.info("SummaryWorker started")
+    else:
+        logger.warning("RAG Engine is not available, skipping SummaryWorker start")
+    logger.info("Startup complete")
+    
     yield
-    await engine.dispose()  # cleanup ตอนปิด
+    
+    # ── Shutdown ──
+    logger.info("Shutting down...")
+    if rag_engine:
+        await rag_engine.summary_worker.shutdown()
+        logger.info("SummaryWorker shut down")
+    await engine.dispose()
+    logger.info("Database engine disposed")
+    logger.info("Shutdown complete")
     
 app = FastAPI(title="KMUTNBLM (FastAPI + MariaDB + JWT)", openapi_tags=tags_metadata, lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")

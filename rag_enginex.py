@@ -251,7 +251,6 @@ class RAGService:
                 max_queue_size=500,
             ),
         )
-        self.summary_worker.start()
 
         logger.info("[bold green]✅ RAG Service Ready![/]")
 
