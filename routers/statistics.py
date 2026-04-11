@@ -3,7 +3,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, cast, Date
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from sqlalchemy.orm import selectinload
 from core.enums import RoleUser, RoleChannel
 from core.security import get_current_user
 from db.session import get_db
@@ -73,9 +73,20 @@ async def number_of_questions_asked_per_day(
     day: int | None = Query(None, ge=1, le=31, description="วันที่ต้องการ (1-31)"),
     channel_id: str | None = Query(None, description="ID ของ Channel ที่ต้องการดูสถิติ"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
 
     raw_channel_id = decode_id(channel_id)
+
+    taget_channel = await db.get(Channel, raw_channel_id)
+    if not taget_channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    is_owner = taget_channel.created_by == current_user.users_id
+    is_admin = current_user.role == RoleUser.admin
+    
+    if not (is_owner or is_admin):
+        raise HTTPException(status_code=403, detail="เฉพาะเจ้าของหรือแอดมินเท่านั้นที่สามารถดูสถิติคำถามของ channel ได้")
     
     # Group by Date (ตัดเวลาทิ้ง เอาแค่วันที่)
     stmt = (
@@ -119,10 +130,21 @@ async def number_of_active_users_per_day(
     day: int | None = Query(None, ge=1, le=31, description="วันที่ต้องการ (1-31)"),
     channel_id: str | None = Query(None, description="ID ของ Channel ที่ต้องการดูสถิติ"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     
     # Group by Date (ตัดเวลาทิ้ง เอาแค่วันที่)
     raw_channel_id = decode_id(channel_id)
+    
+    taget_channel = await db.get(Channel, raw_channel_id)
+    if not taget_channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    
+    is_owner = taget_channel.created_by == current_user.users_id
+    is_admin = current_user.role == RoleUser.admin
+    
+    if not (is_owner or is_admin):
+        raise HTTPException(status_code=403, detail="เฉพาะเจ้าของหรือแอดมินเท่านั้นที่สามารถดูสถิติผู้ใช้งานของ channel ได้")
     
     stmt = (
         select(
@@ -163,7 +185,6 @@ async def number_of_active_users_per_day(
     year: int | None = Query(None, ge=2000, le=2100, description="ปีที่ต้องการ (เช่น 2025)"),
     month: int | None = Query(None, ge=1, le=12, description="เดือนที่ต้องการ (1-12)"),
     day: int | None = Query(None, ge=1, le=31, description="วันที่ต้องการ (1-31)"),
-    channel_id: int | None = Query(None, description="ID ของ Channel ที่ต้องการดูสถิติ"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

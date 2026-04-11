@@ -26,8 +26,13 @@ async def list_file_sizes(db: db.AsyncSession = Depends(db.get_db)):
     return file_sizes
 
 @router.post("/file-size", tags=["File Size"])
-async def create_file_size(payload: FileSizeCreate, db: db.AsyncSession = Depends(db.get_db)):
+async def create_file_size(payload: FileSizeCreate, 
+                           db: db.AsyncSession = Depends(db.get_db),
+                           current_user: User = Depends(get_current_user)):
    
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
+    
     new_file_size = FileSize(size=payload.size)
     db.add(new_file_size)
     await db.flush()
@@ -39,7 +44,10 @@ async def create_file_size(payload: FileSizeCreate, db: db.AsyncSession = Depend
     }
 
 @router.post("/file-size/update", tags=["File Size"])
-async def update_file_size(payload: FileSizeUpdate, db: db.AsyncSession = Depends(db.get_db)):
+async def update_file_size(payload: FileSizeUpdate, db: db.AsyncSession = Depends(db.get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
+
     stmt = select(FileSize).where(FileSize.file_size_id == payload.id)
     result = await db.execute(stmt)
     file_size = result.scalar_one_or_none()

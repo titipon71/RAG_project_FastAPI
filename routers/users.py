@@ -154,10 +154,10 @@ async def update_user_file_size(
 async def set_user_file_size_default(
     user_id: int = Path(..., gt=0),
     db: AsyncSession = Depends(get_db),
-    # current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    # if current_user.role != RoleUser.admin:
-    #     raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
 
     user = await get_user_by_id(db, user_id)
     if not user:
@@ -235,14 +235,14 @@ async def list_users(
     skip: int = 0,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    # current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     try:
-        # if current_user.role != RoleUser.admin:
-        #     raise HTTPException(
-        #         status_code=403,
-        #         detail="ไม่มีสิทธิ์ดำเนินการ"
-        #     )
+        if current_user.role != RoleUser.admin:
+            raise HTTPException(
+                status_code=403,
+                detail="ไม่มีสิทธิ์ดำเนินการ"
+            )
 
         stmt = (
             select(User)

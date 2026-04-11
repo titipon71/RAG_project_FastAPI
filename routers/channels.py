@@ -804,65 +804,75 @@ async def list_pending_channels(
     skip: int = 0,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
-):
-    stmt = (
-        select(Channel)
-        .options(
-            joinedload(Channel.creator).joinedload(User.account_type_rel), 
-            selectinload(Channel.files) 
+    current_user: User = Depends(get_current_user)
+):  
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้นที่สามารถดูช่องทางที่รอการอนุมัติได้")
+    
+    try:    
+        stmt = (
+            select(Channel)
+            .options(
+                joinedload(Channel.creator).joinedload(User.account_type_rel), 
+                selectinload(Channel.files) 
+            )
+            .where(Channel.status == RoleChannel.pending)
+            .order_by(Channel.created_at.desc())
         )
-        .where(Channel.status == RoleChannel.pending)
-        .order_by(Channel.created_at.desc())
-    )
 
-    if search_by_key_and_name:
-        stmt = stmt.where(
-            func.lower(Channel.title).contains(search_by_key_and_name.lower()) |
-            func.lower(Channel.search_key).contains(search_by_key_and_name.lower())
+        if search_by_key_and_name:
+            stmt = stmt.where(
+                func.lower(Channel.title).contains(search_by_key_and_name.lower()) |
+                func.lower(Channel.search_key).contains(search_by_key_and_name.lower())
+            )
+
+        stmt = stmt.offset(skip).limit(limit)
+
+        result = await db.execute(stmt)
+        channels = result.unique().scalars().all()
+
+        channel_list = []
+        for ch in channels:
+            
+            file_list = [
+                {
+                    "files_id": f.files_id,
+                    "original_filename": f.original_filename,
+                    "storage_uri": f.storage_uri,
+                    "size_bytes": f.size_bytes,
+                    "created_at": f.created_at,
+                    "mime": None,
+                    "channel_id": f.channel_id,  # เพิ่ม channel_id (จำเป็น)    
+                }
+                for f in ch.files #
+            ]
+            max_file_size = (
+                            ch.creator.get_max_file_size()
+                            if ch.creator else None
+                            )
+                    
+            channel_list.append(ChannelListPendingItem(
+                channels_id=ch.channels_id,
+                title=ch.title,
+                description=ch.description,
+                status=ch.status,
+                created_by_id=ch.created_by,
+                created_by_name=ch.creator.name if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
+                maximum_file_size=max_file_size,
+                search_key=ch.search_key,
+                created_at=ch.created_at,
+                file_count=len(ch.files),
+                files=file_list,
+            ))
+        if not channel_list:
+            return JSONResponse(status_code=200, content={"message": "ไม่พบช่องทางที่รอการอนุมัติ (Pending Channels)"})
+        return channel_list
+    except Exception as e:
+        logger.error(f"🔥 Error in list_pending_channels: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail="เกิดข้อผิดพลาดขณะดึงรายการช่องทางที่รอการอนุมัติ"
         )
-
-    stmt = stmt.offset(skip).limit(limit)
-
-    result = await db.execute(stmt)
-    channels = result.unique().scalars().all()
-
-    channel_list = []
-    for ch in channels:
-        
-        file_list = [
-            {
-                "files_id": f.files_id,
-                "original_filename": f.original_filename,
-                "storage_uri": f.storage_uri,
-                "size_bytes": f.size_bytes,
-                "created_at": f.created_at,
-                "mime": None,
-                "channel_id": f.channel_id,  # เพิ่ม channel_id (จำเป็น)    
-            }
-            for f in ch.files #
-        ]
-        max_file_size = (
-                        ch.creator.get_max_file_size()
-                        if ch.creator else None
-                        )
-                
-        channel_list.append(ChannelListPendingItem(
-            channels_id=ch.channels_id,
-            title=ch.title,
-            description=ch.description,
-            status=ch.status,
-            created_by_id=ch.created_by,
-            created_by_name=ch.creator.name if ch.creator else "Unknown", # เข้าถึงผ่าน relationship
-            maximum_file_size=max_file_size,
-            search_key=ch.search_key,
-            created_at=ch.created_at,
-            file_count=len(ch.files),
-            files=file_list,
-        ))
-    if not channel_list:
-        return JSONResponse(status_code=200, content={"message": "ไม่พบช่องทางที่รอการอนุมัติ (Pending Channels)"})
-    return channel_list
-
 
 @router.get("/channels/public/list/", response_model=List[ChannelListPublicItem], tags=["Channels"])
 async def list__channels(
@@ -871,6 +881,8 @@ async def list__channels(
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
 ):
+    
+    #ทุกคนสามารถดูช่องทางสาธารณะได้ ไม่จำเป็นต้องเป็นแอดมินหรือเจ้าของ 
     stmt = (
         select(Channel)
         .options(
@@ -1012,10 +1024,10 @@ async def list_all_channels(
     skip: int = 0,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    # current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    # if current_user.role != RoleUser.admin:
-    #     raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="เฉพาะแอดมินเท่านั้น")
 
     try:
         stmt = (
@@ -1092,7 +1104,8 @@ async def list_all_channels(
 @router.get('/channels/{channel_id}/storage-usage', response_model=ChannelFileSizeBalanceResponse, tags=["Channels"])
 async def get_channel_file_size_balance(
     channel_id: str,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
     decoded_id = decode_id(channel_id)
     
@@ -1106,7 +1119,12 @@ async def get_channel_file_size_balance(
     )
     result = await db.execute(stmt)
     channel = result.scalar_one_or_none()
-
+    
+    is_owner = channel.created_by == current_user.users_id if channel else False
+    is_admin = current_user.role == RoleUser.admin
+    if not is_owner and not is_admin:
+        raise HTTPException(status_code=403, detail="เฉพาะเจ้าของหรือแอดมินเท่านั้นที่สามารถดูการใช้งานพื้นที่ของ channel ได้")
+    
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
 

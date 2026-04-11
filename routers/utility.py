@@ -120,15 +120,15 @@ Disallow: /"""
 # ============================================================
 #                  DEBUG / UTIL ROUTES
 # ============================================================
-@router.post("/debug", tags=["System & Utility"])
-def debug_endpoint(
-    channel_id: int = Body(..., embed=True)
-):
-    try:
-        rag_engine.debug_list_docs_by_channel(channel_id=channel_id)
-        return {"message": "Debug payload received"}
-    except Exception as e:
-        return {"error": str(e)}
+# @router.post("/debug", tags=["System & Utility"])
+# def debug_endpoint(
+#     channel_id: int = Body(..., embed=True)
+# ):
+#     try:
+#         rag_engine.debug_list_docs_by_channel(channel_id=channel_id)
+#         return {"message": "Debug payload received"}
+#     except Exception as e:
+#         return {"error": str(e)}
 
 # @router.get("/debug-user-info")
 # async def debug_user_info(db: AsyncSession = Depends(get_db)):

@@ -1,6 +1,9 @@
 from fastapi import APIRouter ,Depends, HTTPException
 from sqlalchemy import select
 from core import logging
+from core.enums import RoleUser
+from core.security import get_current_user
+from db.models.user import User
 from db.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models.account_type import AccountType
@@ -37,8 +40,14 @@ async def list_account_types(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
     
 @router.put("/account-types", tags=["Account Types"], response_model=AccountTypeResponse)
-async def update_size_for_account_type(payload: AccountTypeUpdateSizeRequest, db: AsyncSession = Depends(get_db)):
+async def update_size_for_account_type(payload: AccountTypeUpdateSizeRequest,
+                                       db: AsyncSession = Depends(get_db),
+                                       current_user: User = Depends(get_current_user)):
+    if current_user.role != RoleUser.admin:
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
+    
     try:
+        
         stmt = select(AccountType).where(AccountType.account_type_id == payload.account_type_id)
         result = await db.execute(stmt)
         account_type = result.scalar_one_or_none()
@@ -56,6 +65,9 @@ async def update_size_for_account_type(payload: AccountTypeUpdateSizeRequest, db
             type_name=account_type.type_name,
             file_size_byte=account_type.file_size_default
         )
+
+    except HTTPException:
+        raise
         
     except Exception as e:
         print("="*50)
