@@ -109,9 +109,12 @@ class AppConfig:
     CHUNK_SIZE: int = 512
     
     # Prompts
-    SAFETY_SYSTEM_PROMPT: str = (
-        "คุณคือผู้ช่วยอัจฉริยะที่ตอบคำถามอย่างสุภาพและชัดเจน "
-        "เอาความรู้มาจากเอกสารที่มีเท่านั้น ถ้าไม่มีในเอกสารให้บอกว่า 'ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่มีอยู่ 😔' ถ้ามีก็ไม่เป็นปัญหา"
+    SAFETY_SYSTEM_PROMPT = (
+        "You are a document Q&A assistant. "
+        "Answer ONLY using information explicitly stated in the provided context. "
+        "If the answer is not in the context, reply exactly: "
+        "'ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่มีอยู่ 😔' "
+        "Do NOT use outside knowledge. Do NOT guess. Do NOT infer beyond what is written."
     )
     
     MAX_CACHE_NODES: int = int(os.getenv("MAX_CACHE_NODES", "100000"))
@@ -822,7 +825,12 @@ class RAGService:
                 "usage": token_usage,
                 "sources": [],
             }
-
+            
+        TOP_SCORE_THRESHOLD = 0.35
+        top_score = response.source_nodes[0].score or 0
+        if top_score < TOP_SCORE_THRESHOLD:
+            return {"answer": "ขออภัย ไม่พบข้อมูลที่เกี่ยวข้องในเอกสาร 😔", "usage": token_usage, "sources": []}
+        
         file_names = self._extract_source_filenames(response.source_nodes)
         if file_names:
             logger.info(f"Sources used: [green]{file_names}[/]")

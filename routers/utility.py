@@ -26,7 +26,7 @@ def healthz_get():
 def healthz_head():
     return Response(status_code=200)
 
-base64_icon = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+base64_icon = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmsQAAAABJRU5ErkJggg=="
 @router.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     image_bytes = base64.b64decode(base64_icon)
