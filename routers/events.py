@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from core.sse_manager import sse_manager
-from core.enums import RoleUser
+from core.enums import ModerationDecision, RoleChannel, RoleUser
 from core.security import get_current_user
 from db.session import get_db
 from db.models.user import User
@@ -25,6 +25,8 @@ logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
 import os
 from dotenv import load_dotenv
+
+OWNER_SET_PRIVATE_REASON = "Changed to private by owner"
 
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
 ALGORITHM = "HS256"
@@ -63,7 +65,16 @@ async def get_channel_status_events_by_user(
             .limit(limit)
         )
 
-        if not is_admin_view:
+        if is_admin_view:
+            stmt = stmt.where(
+                ~(
+                    (ChannelStatusEvent.new_status == RoleChannel.private)
+                    & (ChannelStatusEvent.decision == ModerationDecision.approved)
+                    & (ChannelStatusEvent.decision_reason == OWNER_SET_PRIVATE_REASON)
+                    & (ChannelStatusEvent.requested_by == ChannelStatusEvent.decided_by)
+                )
+            )
+        else:
             stmt = stmt.where(ChannelStatusEvent.requested_by == user_id)
         
         result = await db.execute(stmt)

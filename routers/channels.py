@@ -747,6 +747,10 @@ async def owner_set_this_channel_private(
     old_status = channel.status
     channel.status = RoleChannel.private
 
+    # ถ้าเป็นการเปลี่ยนโดยเจ้าของเอง ให้ mark admin ว่าอ่านแล้วทันที
+    # เพื่อลดการแจ้งเตือนไปยังแอดมินใน flow นี้
+    admin_already_read = current_user.role != RoleUser.admin
+
     # 4. บันทึกประวัติการเปลี่ยนสถานะใน ChannelStatusEvent
     event = ChannelStatusEvent(
         channel_id=channel.channels_id,
@@ -757,6 +761,7 @@ async def owner_set_this_channel_private(
         decision=ModerationDecision.approved, # ถือว่าอนุมัติทันทีโดยเจ้าของ
         decision_reason="Changed to private by owner",
         is_user_read=False,
+        is_admin_read=admin_already_read,
         decided_at=datetime.now(timezone.utc)
     )
     db.add(event)
