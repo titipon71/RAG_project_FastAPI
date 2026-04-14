@@ -175,6 +175,8 @@ async def update_user_password(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if current_user.role != RoleUser.admin and current_user.users_id != user_id:
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
     user = await get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
@@ -195,6 +197,8 @@ async def delete_user(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if current_user.role != RoleUser.admin and current_user.users_id != user_id:
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดำเนินการ")
     user = await get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งาน")
