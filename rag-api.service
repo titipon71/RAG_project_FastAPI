@@ -1,0 +1,14 @@
+[Unit]
+Description=RAG FastAPI App
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/RAG_project_FastAPI
+ExecStart=/root/RAG_project_FastAPI/venv/bin/uvicorn main:app --port 8000
+Restart=always
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

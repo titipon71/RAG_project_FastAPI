@@ -202,8 +202,6 @@ threadpoolctl==3.6.0
 tifffile==2026.3.3
 tiktoken==0.12.0
 tokenizers==0.22.1
-torch==2.9.0+cu128
-torchvision==0.24.0+cu128
 tqdm==4.67.1
 transformers==4.57.1
 trec-car-tools==2.6

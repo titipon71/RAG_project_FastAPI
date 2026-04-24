@@ -12,7 +12,6 @@ from sqlalchemy.orm import selectinload
 from core.config import settings
 from core.enums import RoleUser, SSOLoginType
 from core.security import create_access_token
-from db.models.account_type import AccountType
 from db.session import get_db
 from db.models.user import User
 from schemas.auth import SSOCodeRequest
@@ -50,6 +49,10 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
             "local": {
                 "summary": "Local environment",
                 "value": {"code": "abc123", "type": "local"}
+            },
+            "server": {
+                "summary": "Server environment (default)",
+                "value": {"code": "abc123", "type": "server"}
             }
         }), db: AsyncSession = Depends(get_db)):
     try:
@@ -58,7 +61,7 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
         # =========================
         try:
             if payload.type is None:
-                redirect_uri = "https://fastapi888.lukeenortaed.site/callback"
+                redirect_uri = "http://thinkhub.kmutnb.ac.th/callback"
 
             elif payload.type == SSOLoginType.fastapi:
                 redirect_uri = "https://fastapi888.lukeenortaed.site/callback"
@@ -71,7 +74,10 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
 
             elif payload.type == SSOLoginType.local2:
                 redirect_uri = "http://127.0.0.1:3000/callback"
-            
+
+            elif payload.type == SSOLoginType.server:
+                redirect_uri = "http://thinkhub.kmutnb.ac.th/callback"
+
             else:
                 logger.error(f"Invalid SSOLoginType: {payload.type}")
                 raise HTTPException(status_code=400, detail="Invalid SSO login type")
@@ -138,7 +144,7 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
         # 3) ค้นหาหรือสร้าง User
         # =========================
         try:
-            stmt = select(User).where(User.username == username)
+            stmt = select(User).options(selectinload(User.account_type_rel)).where(User.username == username)
             result = await db.execute(stmt)
             user = result.scalar_one_or_none()
             account_type_name = sso_data.get("profile", {}).get("account_type")
@@ -158,21 +164,19 @@ async def sso_kmutnb(payload: SSOCodeRequest = Body(openapi_examples={
 
                 db.add(new_user)
                 await db.flush()
-                await db.refresh(new_user)
                 user = new_user
             else:
-                account_type_name = sso_data.get("profile", {}).get("account_type")
                 logger.info(f"Existing user logged in via SSO: {username} | account_type from SSO: {account_type_name}")
-                if account_type_name:
-                    stmt = select(AccountType).where(AccountType.type_name == account_type_name)
-                    result = await db.execute(stmt)
-                    account_type = result.scalar_one_or_none()
-
-                    if account_type:
-                        user.account_type_rel = account_type
+                if account_type:
+                    user.account_type_rel = account_type
                 
                 user.active_at = func.current_timestamp()
                 await db.flush()
+
+            # Ensure relationship is loaded before accessing it in response
+            stmt = select(User).options(selectinload(User.account_type_rel)).where(User.users_id == user.users_id)
+            result = await db.execute(stmt)
+            user = result.scalar_one()
 
         except IntegrityError:
             logger.warning(f"Duplicate user from SSO | username={username}")

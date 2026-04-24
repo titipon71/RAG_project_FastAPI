@@ -10,7 +10,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from core.sse_manager import sse_manager
+from core.sse_manager import sse_manager, _SENTINEL
 from core.enums import ModerationDecision, RoleChannel, RoleUser
 from core.security import get_current_user
 from db.session import get_db
@@ -160,6 +160,10 @@ async def stream_notifications(
                         break
                     try:
                         data = await asyncio.wait_for(q.get(), timeout=30.0)
+                        
+                        if data is _SENTINEL:
+                            break
+                        
                         yield (
                             "event: notification\n"
                             f"data: {data}\n\n"

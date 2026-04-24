@@ -1,4 +1,5 @@
 # main.py
+import asyncio
 import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 from scalar_fastapi import get_scalar_api_reference
 
+from core.sse_manager import sse_manager
 from core.config import settings
 from core.tag import tags_metadata
 from core.cors import ALLOWED_ORIGINS, ALLOW_ORIGIN_REGEX
@@ -39,6 +41,10 @@ async def lifespan(app: FastAPI):
     
     # ── Shutdown ──
     logger.info("Shutting down...")
+    
+    await sse_manager.shutdown()
+    await asyncio.sleep(0.5)
+    
     if rag_engine:
         await rag_engine.summary_worker.shutdown()
         logger.info("SummaryWorker shut down")
@@ -46,7 +52,13 @@ async def lifespan(app: FastAPI):
     logger.info("Database engine disposed")
     logger.info("Shutdown complete")
     
-app = FastAPI(title="KMUTNBLM (FastAPI + MariaDB + JWT)", openapi_tags=tags_metadata, lifespan=lifespan)
+app = FastAPI(
+    title="KMUTNBLM (FastAPI + MariaDB + JWT)",
+    root_path="/fastapi",
+    openapi_url="/openapi.json",
+    openapi_tags=tags_metadata,
+    lifespan=lifespan,
+)
 templates = Jinja2Templates(directory="templates")
 
 # ---------- Static Files ----------

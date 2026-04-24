@@ -1,7 +1,9 @@
 from email.mime import text
+import asyncio
 import os
 import re
 import logging
+import urllib.request
 from typing import List, Optional, Dict, Any, Union, AsyncGenerator
 from dataclasses import dataclass
 
@@ -94,10 +96,16 @@ class AppConfig:
     LANCEDB_DIR: str = os.getenv("LANCEDB_DIR", "./lancedb")     
     TABLE_NAME: str = "quickstart2"                                   
     
-    # Models
+    # === Ollama Models ===
     EMBED_MODEL_NAME: str = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma3:1b")
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://172.16.212.100:11434")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "ministral-3:3b")
+
+    # SummaryWorker fallback LLM (ใช้เฉพาะงาน summarize)
+    SUMMARY_FALLBACK_OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "mistralai/ministral-3b-2512")
+    SUMMARY_FALLBACK_OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    SUMMARY_FALLBACK_OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    SUMMARY_FALLBACK_OPENROUTER_CONTEXT_WINDOW: int = int(os.getenv("OPENROUTER_CONTEXT_WINDOW", "262144"))
     
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -110,11 +118,14 @@ class AppConfig:
     
     # Prompts
     SAFETY_SYSTEM_PROMPT = (
-        "You are a document Q&A assistant. "
-        "Answer ONLY using information explicitly stated in the provided context. "
-        "If the answer is not in the context, reply exactly: "
-        "'ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่มีอยู่ 😔' "
-        "Do NOT use outside knowledge. Do NOT guess. Do NOT infer beyond what is written."
+        "คุณคือ AI ผู้ช่วยตอบคำถามจากเอกสาร\n\n"
+        "กฎเหล็ก:\n"
+        "1. ตอบโดยใช้ข้อมูลจาก [Context] ที่ให้มาเท่านั้น\n"
+        "2. หากไม่พบคำตอบใน [Context] ให้ตอบว่า: "
+        "'ขออภัย ฉันไม่พบข้อมูลที่เกี่ยวข้องในเอกสารที่มีอยู่ 😔 / "
+        "Sorry, I could not find relevant information in the available documents. 😔'\n"
+        "3. ห้ามใช้ความรู้ภายนอก ห้ามคาดเดา ห้ามสรุปเกินกว่าที่เขียนไว้\n\n"
+        "ภาษา: ตอบด้วยภาษาเดียวกับที่ผู้ใช้ถาม (ไทยหรืออังกฤษ)"
     )
     
     MAX_CACHE_NODES: int = int(os.getenv("MAX_CACHE_NODES", "100000"))
@@ -232,7 +243,7 @@ class RAGService:
 
         logger.info(f"Initializing Redis Chat Store at [italic hot_pink]{config.REDIS_URL}[/]...")
         try:
-            self.chat_store = RedisChatStore(redis_url=config.REDIS_URL)
+            self.chat_store = RedisChatStore(redis_url=config.REDIS_URL,ttl=86400)
             if self.chat_store._redis_client.ping():
                 logger.info("[bold green]✅ Connected to Redis Chat Store successfully.[/]")
             else:
@@ -241,14 +252,17 @@ class RAGService:
             logger.error(f"[bold red]❌ Failed to connect to Redis:[/]\n{e}")
             raise e
 
+        summary_fallback_llm = self._init_summary_fallback_llm()
+
         # ✅ [STEP 2 — จุดที่ 1] Init และ start SummaryWorker หลัง Redis พร้อม
         self.summary_worker = SummaryWorker(
             llm=self.llm,
             chat_store=self.chat_store,
             nodes_lock=self.nodes_lock,
             nodes_cache=self.nodes_cache,
+            fallback_llm=summary_fallback_llm,
             cfg=SummaryWorkerConfig(
-                redis_ttl_seconds=60 * 60 * 24 * 7,   # 7 วัน
+                redis_ttl_seconds=None,
                 max_retries=3,
                 retry_delay_seconds=5.0,
                 max_queue_size=500,
@@ -331,6 +345,7 @@ class RAGService:
     
     def _init_ollama_llm(self) -> Ollama:
         logger.info(f"Using [bold green]Ollama[/] — model: [yellow]{config.OLLAMA_MODEL}[/]")
+        self._log_ollama_connectivity()
         return Ollama(
             model=config.OLLAMA_MODEL,
             base_url=config.OLLAMA_BASE_URL,
@@ -339,6 +354,72 @@ class RAGService:
             num_output=config.NUM_OUTPUT,
             system_prompt=config.SAFETY_SYSTEM_PROMPT,
         )
+
+    def _init_summary_fallback_llm(self):
+        model_name = config.SUMMARY_FALLBACK_OPENROUTER_MODEL.strip()
+        if not model_name:
+            logger.info(
+                "Summary fallback LLM is disabled (SUMMARY_FALLBACK_OPENROUTER_MODEL is empty)"
+            )
+            return None
+
+        api_key = config.SUMMARY_FALLBACK_OPENROUTER_API_KEY.strip()
+        if not api_key:
+            logger.warning(
+                "[bold yellow]⚠️ Summary fallback LLM disabled: SUMMARY_FALLBACK_OPENROUTER_API_KEY is empty[/]"
+            )
+            return None
+
+        base_url = config.SUMMARY_FALLBACK_OPENROUTER_BASE_URL
+        logger.info(
+            f"Configuring SummaryWorker fallback LLM — OpenRouter model: [yellow]{model_name}[/]"
+        )
+        try:
+            return OpenAILike(
+                model=model_name,
+                api_base=base_url,
+                api_key=api_key,
+                context_window=config.SUMMARY_FALLBACK_OPENROUTER_CONTEXT_WINDOW,
+                max_tokens=4096,
+                is_chat_model=True,
+                system_prompt=config.SAFETY_SYSTEM_PROMPT,
+                default_headers={
+                    "HTTP-Referer": os.getenv(
+                        "SUMMARY_FALLBACK_OPENROUTER_REFERER",
+                        os.getenv("OPENROUTER_REFERER", "http://localhost"),
+                    ),
+                    "X-Title": os.getenv(
+                        "SUMMARY_FALLBACK_OPENROUTER_APP_TITLE",
+                        os.getenv("OPENROUTER_APP_TITLE", "RAG-App"),
+                    ),
+                },
+            )
+        except Exception as e:
+            logger.warning(
+                f"[bold yellow]⚠️ Failed to initialize SummaryWorker fallback LLM:[/] {e}"
+            )
+            return None
+
+    def _log_ollama_connectivity(self, base_url: str | None = None) -> None:
+        resolved_base_url = (base_url or config.OLLAMA_BASE_URL).rstrip("/")
+        health_url = f"{resolved_base_url}/api/tags"
+        try:
+            request = urllib.request.Request(health_url, method="GET")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if 200 <= response.status < 300:
+                    logger.info(
+                        f"[bold green]✅ Ollama is reachable at[/] [yellow]{resolved_base_url}[/]"
+                    )
+                    return
+
+                logger.warning(
+                    f"[bold yellow]⚠️ Ollama responded with unexpected status {response.status} at[/] "
+                    f"[yellow]{resolved_base_url}[/]"
+                )
+        except Exception as e:
+            logger.warning(
+                f"[bold yellow]⚠️ Cannot connect to Ollama at[/] [yellow]{resolved_base_url}[/]: {e}"
+            )
     
     def _init_openrouter_llm(self):
         if not config.OPENROUTER_API_KEY:
@@ -795,9 +876,101 @@ class RAGService:
             "from_summary": True,   # ← ให้ API layer รู้ว่ามาจาก summary cache
         }
 
+    async def _build_summary_progress_status(self, channel_id: str) -> Dict[str, Any]:
+        with self.nodes_lock:
+            file_names = sorted(
+                {
+                    str(node.metadata.get("file_name") or node.metadata.get("filename") or "")
+                    for node in self.nodes_cache.values()
+                    if str(node.metadata.get("channel_id", "")) == channel_id
+                }
+            )
+
+        file_names = [name for name in file_names if name]
+
+        if not file_names:
+            return {
+                "ready": False,
+                "status": "not_found",
+                "ready_files": 0,
+                "total_files": 0,
+                "processing_files": 0,
+                "queued_files": 0,
+                "failed_files": 0,
+                "message": "Summary ภาพรวมยังไม่พร้อม และยังไม่พบไฟล์ใน channel นี้",
+            }
+
+        statuses = await asyncio.gather(
+            *[
+                self.summary_worker.is_ready(channel_id=channel_id, file_name=file_name)
+                for file_name in file_names
+            ],
+            return_exceptions=True,
+        )
+
+        ready_files = 0
+        processing_files = 0
+        queued_files = 0
+        failed_files = 0
+        not_queued_files = 0
+
+        for status in statuses:
+            if isinstance(status, Exception):
+                continue
+
+            if status.get("ready"):
+                ready_files += 1
+
+            state = status.get("status")
+            if state == "processing":
+                processing_files += 1
+            elif state == "queued":
+                queued_files += 1
+            elif state == "failed":
+                failed_files += 1
+            elif state == "not_queued":
+                not_queued_files += 1
+
+        activities: list[str] = []
+        if processing_files > 0:
+            activities.append(f"กำลังสรุป {processing_files} ไฟล์")
+        if queued_files > 0:
+            activities.append(f"รอคิว {queued_files} ไฟล์")
+        if not_queued_files > 0:
+            activities.append(f"เตรียมส่งคิว {not_queued_files} ไฟล์")
+        if failed_files > 0:
+            activities.append(f"สรุปไม่สำเร็จ {failed_files} ไฟล์")
+
+        activity_text = ", ".join(activities) if activities else "กำลังเตรียมข้อมูลสรุป"
+        total_files = len(file_names)
+        message = (
+            f"Summary ภาพรวมยังไม่พร้อม ({ready_files}/{total_files} ไฟล์พร้อมใช้งาน) "
+            f"ตอนนี้ระบบ{activity_text} จึงใช้โหมดค้นเอกสารปกติชั่วคราว"
+        )
+
+        return {
+            "ready": False,
+            "status": "pending",
+            "ready_files": ready_files,
+            "total_files": total_files,
+            "processing_files": processing_files,
+            "queued_files": queued_files,
+            "failed_files": failed_files,
+            "message": message,
+        }
+
+    @staticmethod
+    def _prepend_notice(answer: str, notice: Optional[str]) -> str:
+        if not notice:
+            return answer
+        if not answer:
+            return notice
+        return f"{notice}\n\n{answer}"
+
     async def aquery(self, question: str, channel_id: Union[str, int], sessions_id: Union[str, int, None] = None) -> Dict[str, Any]:
         logger.info(f"Querying: [bold cyan]{question}[/] (Channel: {channel_id})")
         self.token_handler.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        summary_status: Dict[str, Any] | None = None
 
         # ✅ [STEP 3] Overview routing — ถ้าเป็นคำถาม overview ให้ใช้ summary จาก Redis ก่อน
         if self._is_overview_question(question):
@@ -807,6 +980,8 @@ class RAGService:
                 logger.info("[bold magenta]ROUTE SELECTED (query): SUMMARY[/] — answered from summary cache")
                 return summary_result
             # summary ยังไม่พร้อม → fall through ไป RAG ปกติด้านล่าง
+            summary_status = await self._build_summary_progress_status(str(channel_id))
+            logger.info(f"[bold yellow]SUMMARY STATUS (query):[/] {summary_status['message']}")
             logger.info("[bold yellow]ROUTE FALLBACK (query): RAG HYBRID[/] — summary not ready")
         else:
             logger.info("[bold cyan]ROUTE SELECTED (query): RAG HYBRID[/] — non-overview question")
@@ -816,30 +991,54 @@ class RAGService:
         response = await chat_engine.achat(question)
 
         answer_text = self._strip_think(str(response))
+        if summary_status:
+            answer_text = self._prepend_notice(answer_text, summary_status.get("message"))
         token_usage = self._resolve_usage(response)
 
         if not response.source_nodes:
             logger.info("[yellow]No source nodes found.[/]")
-            return {
-                "answer": "ตอนนี้ยังไม่มีเอกสารที่ใช้ตอบได้เลยนะ🤔 รบกวนเพิ่มเอกสารก่อนนะคะ😊",
+            result = {
+                "answer": self._prepend_notice(
+                    "ตอนนี้ยังไม่มีเอกสารที่ใช้ตอบได้เลยนะ🤔 รบกวนเพิ่มเอกสารก่อนนะคะ😊",
+                    summary_status.get("message") if summary_status else None,
+                ),
                 "usage": token_usage,
                 "sources": [],
             }
+            if summary_status:
+                result["summary_status"] = summary_status
+                result["from_summary"] = False
+            return result
             
         TOP_SCORE_THRESHOLD = 0.35
         top_score = response.source_nodes[0].score or 0
         if top_score < TOP_SCORE_THRESHOLD:
-            return {"answer": "ขออภัย ไม่พบข้อมูลที่เกี่ยวข้องในเอกสาร 😔", "usage": token_usage, "sources": []}
+            result = {
+                "answer": self._prepend_notice(
+                    "ขออภัย ไม่พบข้อมูลที่เกี่ยวข้องในเอกสาร 😔",
+                    summary_status.get("message") if summary_status else None,
+                ),
+                "usage": token_usage,
+                "sources": [],
+            }
+            if summary_status:
+                result["summary_status"] = summary_status
+                result["from_summary"] = False
+            return result
         
         file_names = self._extract_source_filenames(response.source_nodes)
         if file_names:
             logger.info(f"Sources used: [green]{file_names}[/]")
 
-        return {
+        result = {
             "answer": answer_text,
             "usage": token_usage,
             "sources": file_names,
         }
+        if summary_status:
+            result["summary_status"] = summary_status
+            result["from_summary"] = False
+        return result
 
     async def astream_query(
         self,
@@ -849,6 +1048,8 @@ class RAGService:
     ) -> AsyncGenerator[Dict[str, Any], None]:
         logger.info(f"Streaming query: [bold cyan]{question}[/] (Channel: {channel_id})")
         self.token_handler.latest_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        summary_status: Dict[str, Any] | None = None
+        full_answer = ""
 
         # ✅ [STEP 3] Overview routing สำหรับ streaming
         if self._is_overview_question(question):
@@ -868,15 +1069,22 @@ class RAGService:
                 }
                 return
             # summary ยังไม่พร้อม → fall through ไป RAG ปกติด้านล่าง
+            summary_status = await self._build_summary_progress_status(str(channel_id))
+            logger.info(f"[bold yellow]SUMMARY STATUS (stream):[/] {summary_status['message']}")
             logger.info("[bold yellow]ROUTE FALLBACK (stream): RAG HYBRID[/] — summary not ready")
         else:
             logger.info("[bold cyan]ROUTE SELECTED (stream): RAG HYBRID[/] — non-overview question")
+
+        if summary_status:
+            notice = f"{summary_status['message']}\n\n"
+            for token in notice:
+                full_answer += token
+                yield {"type": "token", "token": token}
 
         logger.info("[bold cyan]Using normal RAG retrieval pipeline (hybrid retrieval) for streaming[/]")
         chat_engine = self._get_chat_engine(str(channel_id), sessions_id)
 
         streaming_response = await chat_engine.astream_chat(question)
-        full_answer = ""
 
         async for token in streaming_response.async_response_gen():
             full_answer += token
@@ -885,12 +1093,17 @@ class RAGService:
         sources = self._extract_source_filenames(streaming_response.source_nodes)
         usage = self._resolve_usage(streaming_response)
 
-        yield {
+        meta_payload: Dict[str, Any] = {
             "type": "meta",
             "answer": self._strip_think(full_answer),
             "sources": sources,
             "usage": usage,
         }
+        if summary_status:
+            meta_payload["summary_status"] = summary_status
+            meta_payload["from_summary"] = False
+
+        yield meta_payload
     
     def debug_list_docs_by_channel(self, channel_id: int):
         try:

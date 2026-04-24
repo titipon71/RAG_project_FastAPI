@@ -16,6 +16,7 @@ class File(Base):
     uploaded_by: Mapped[Optional[int]] = mapped_column("uploaded_by", MyInt(unsigned=True), ForeignKey("users.users_id"), nullable=True)
     channel_id: Mapped[Optional[int]] = mapped_column("channel_id", MyInt(unsigned=True), ForeignKey("channels.channels_id"), nullable=False)
     original_filename: Mapped[str] = mapped_column("original_filename", String(512), nullable=False)
+    stored_filename: Mapped[str] = mapped_column("stored_filename", String(512), nullable=False)
     storage_uri: Mapped[str] = mapped_column("storage_uri", String(1024), nullable=False)
     size_bytes: Mapped[Optional[int]] = mapped_column("size_bytes", MyInt(unsigned=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column("created_at", server_default=func.current_timestamp(), nullable=False)

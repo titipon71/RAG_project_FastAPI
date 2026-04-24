@@ -6,7 +6,7 @@ import traceback
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Form
+from fastapi import APIRouter, Depends, HTTPException, Path, Form, Query
 from fastapi import File as FastAPIFile, UploadFile
 from fastapi.responses import FileResponse, Response
 from llama_index.core import Document, SimpleDirectoryReader
@@ -37,6 +37,64 @@ router = APIRouter()
 # ============================================================
 #                  FILE ROUTES
 # ============================================================
+@router.get("/summary-status", tags=["Files"])
+async def get_summary_status(
+    channel_id: str = Query(..., description="Hashed channel ID"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """เช็กสถานะ summary ของไฟล์สำหรับ frontend"""
+    real_channel_id = decode_id(channel_id)
+    if real_channel_id is None:
+        raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
+
+    result = await db.execute(
+        select(Channel).where(Channel.channels_id == real_channel_id)
+    )
+    channel = result.scalar_one_or_none()
+    if channel is None:
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
+
+    is_private_like = channel.status in (RoleChannel.private, RoleChannel.pending)
+    is_owner = channel.created_by == current_user.users_id
+    is_admin = current_user.role == RoleUser.admin
+
+    if is_private_like and not (is_owner or is_admin):
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์เข้าถึง Channel นี้")
+
+    files_result = await db.execute(
+        select(File.original_filename, File.stored_filename).where(File.channel_id == real_channel_id)
+    )
+    
+    rows = files_result.all()
+    
+    unique_files = sorted({(r.original_filename, r.stored_filename) for r in rows if r.stored_filename})
+
+    statuses = await asyncio.gather(
+        *[
+            rag_engine.summary_worker.is_ready(
+                channel_id=str(real_channel_id),
+                file_name=stored_name,
+            )
+            for _, stored_name in unique_files
+        ]
+    )
+
+    return {
+        "channel_id": channel_id,
+        "mode": "all_files",
+        "total_files": len(unique_files),
+        "ready_files": sum(1 for item in statuses if item.get("ready")),
+        "files": [
+            {
+                "file_name": orig_name,
+                **status,
+            }
+            for (orig_name, _), status in zip(unique_files, statuses)
+        ],
+    }
+
+
 @router.get("/files/list/{channel_id}", response_model=FileListItem, tags=["Files"])
 async def list_files_in_channel(
     channel_id: str = Path(...),
@@ -45,8 +103,8 @@ async def list_files_in_channel(
 ):
     real_channel_id = decode_id(channel_id)
     if real_channel_id is None:
-         raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
-     
+        raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
+    
     # 1) ตรวจสอบว่า channel มีอยู่จริง
     stmt = (
     select(Channel)
@@ -155,6 +213,7 @@ async def upload_files_only(
                 uploaded_by=current_user.users_id,
                 channel_id=real_channel_id,
                 original_filename=uf.filename or final_path.name,
+                stored_filename=final_path.name,
                 storage_uri=rel_path,
                 size_bytes=size_bytes,
             )

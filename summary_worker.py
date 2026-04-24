@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import Lock
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from llama_index.core.indices import SummaryIndex
 
@@ -29,7 +29,7 @@ logger = logging.getLogger("RAG_ENGINE")
 
 @dataclass
 class SummaryWorkerConfig:
-    redis_ttl_seconds: int = 60 * 60 * 24 * 7   # 7 วัน
+    redis_ttl_seconds: int | None = None
     max_retries: int = 3
     retry_delay_seconds: float = 5.0
     summarize_prompt: str = (
@@ -52,6 +52,12 @@ class SummaryJob:
     @property
     def redis_key(self) -> str:
         return f"summary:{self.channel_id}:{self.file_name}"
+
+
+@dataclass(frozen=True)
+class SummaryFailureInfo:
+    attempts: int
+    error: str
 
 
 # ──────────────────────────────────────────────
@@ -79,9 +85,11 @@ class SummaryWorker:
         chat_store: "RedisChatStore",
         nodes_lock: Lock,
         nodes_cache: dict[str, "TextNode"],
+        fallback_llm: Any | None = None,
         cfg: SummaryWorkerConfig | None = None,
     ):
         self.llm = llm
+        self.fallback_llm = fallback_llm
         self.chat_store = chat_store
         self.nodes_lock = nodes_lock
         self.nodes_cache = nodes_cache
@@ -93,6 +101,11 @@ class SummaryWorker:
         # เก็บ jobs ที่อยู่ใน queue / กำลัง process → ป้องกัน enqueue ซ้ำ
         self._pending: set[SummaryJob] = set()
         self._pending_lock = asyncio.Lock()
+
+        # state สำหรับรายงานความพร้อมของ summary ให้ผู้ใช้
+        self._active_job: SummaryJob | None = None
+        self._attempts: dict[SummaryJob, int] = {}
+        self._failed_jobs: dict[SummaryJob, SummaryFailureInfo] = {}
 
         self._task: asyncio.Task | None = None
         self._shutdown_event = asyncio.Event()
@@ -144,6 +157,7 @@ class SummaryWorker:
         try:
             self._queue.put_nowait(job)
             self._pending.add(job)
+            self._failed_jobs.pop(job, None)
             logger.info(
                 f"📥 Enqueued summary job — channel={channel_id} file={file_name} "
                 f"(queue size: {self._queue.qsize()})"
@@ -198,10 +212,116 @@ class SummaryWorker:
         except Exception as e:
             logger.warning(f"Failed to delete summary {job.redis_key}: {e}")
 
-    async def is_ready(self, channel_id: str, file_name: str) -> bool:
-        """ตรวจว่า summary พร้อมใช้แล้วหรือยัง"""
+    async def is_ready(self, channel_id: str, file_name: str) -> dict[str, Any]:
+        """
+        ตรวจสถานะความพร้อมของ summary
+
+        Returns:
+            {
+                "ready": bool,
+                "status": str,
+                "progress_percent": int,
+                "message": str,
+                "queue_position": int | None,
+                "attempt": int,
+                "max_retries": int,
+                "redis_key": str,
+            }
+        """
+        job = SummaryJob(channel_id=str(channel_id), file_name=str(file_name))
         summary = await self.get(channel_id, file_name)
-        return summary is not None
+
+        if summary is not None:
+            return {
+                "ready": True,
+                "status": "ready",
+                "progress_percent": 100,
+                "message": "Summary พร้อมใช้งานแล้ว",
+                "queue_position": None,
+                "attempt": self._attempts.get(job, 0),
+                "max_retries": self.cfg.max_retries,
+                "redis_key": job.redis_key,
+            }
+
+        if self._active_job == job:
+            attempt = max(1, self._attempts.get(job, 1))
+            base = 50
+            retry_weight = 40
+            retry_progress = int(
+                ((attempt - 1) / max(self.cfg.max_retries, 1)) * retry_weight
+            )
+            progress = min(95, base + retry_progress)
+            return {
+                "ready": False,
+                "status": "processing",
+                "progress_percent": progress,
+                "message": f"กำลังสรุปเอกสาร (attempt {attempt}/{self.cfg.max_retries})",
+                "queue_position": 0,
+                "attempt": attempt,
+                "max_retries": self.cfg.max_retries,
+                "redis_key": job.redis_key,
+            }
+
+        if job in self._pending:
+            queue_position = self._queue_position(job)
+            queue_size = max(self._queue.qsize(), 1)
+            if queue_position is None:
+                progress = 15
+                queue_message = "งานอยู่ในคิว"
+            else:
+                # คิวหน้า ๆ จะได้เปอร์เซ็นต์มากกว่า เพื่อให้ผู้ใช้เห็นความคืบหน้า
+                progress = max(10, min(45, 45 - int(((queue_position - 1) / queue_size) * 30)))
+                queue_message = f"รอคิวประมวลผล (ลำดับที่ {queue_position})"
+            return {
+                "ready": False,
+                "status": "queued",
+                "progress_percent": progress,
+                "message": queue_message,
+                "queue_position": queue_position,
+                "attempt": self._attempts.get(job, 0),
+                "max_retries": self.cfg.max_retries,
+                "redis_key": job.redis_key,
+            }
+
+        failed = self._failed_jobs.get(job)
+        if failed:
+            return {
+                "ready": False,
+                "status": "failed",
+                "progress_percent": 0,
+                "message": (
+                    f"สรุปเอกสารไม่สำเร็จหลัง retry ครบ {failed.attempts} ครั้ง: "
+                    f"{failed.error}"
+                ),
+                "queue_position": None,
+                "attempt": failed.attempts,
+                "max_retries": self.cfg.max_retries,
+                "redis_key": job.redis_key,
+            }
+
+        nodes = self._get_nodes_for_job(job)
+        if nodes:
+            return {
+                "ready": False,
+                "status": "not_queued",
+                "progress_percent": 0,
+                "message": "พบเอกสารแล้ว แต่ยังไม่ถูกส่งเข้า queue summary",
+                "queue_position": None,
+                "attempt": 0,
+                "max_retries": self.cfg.max_retries,
+                "redis_key": job.redis_key,
+            }
+
+        return {
+            "ready": False,
+            "status": "not_found",
+            "progress_percent": 0,
+            "message": "ไม่พบข้อมูลเอกสารสำหรับสร้าง summary",
+            "queue_position": None,
+            "attempt": 0,
+            "max_retries": self.cfg.max_retries,
+            "redis_key": job.redis_key,
+        }
 
     # ── Internal — Worker Loop ─────────────────
 
@@ -219,17 +339,23 @@ class SummaryWorker:
                 break
 
             try:
+                self._active_job = job
                 await self._process_with_retry(job)
             finally:
+                if self._active_job == job:
+                    self._active_job = None
                 self._queue.task_done()
                 self._pending.discard(job)
+                self._attempts.pop(job, None)
 
         logger.info("SummaryWorker loop exited")
 
     async def _process_with_retry(self, job: SummaryJob) -> None:
         for attempt in range(1, self.cfg.max_retries + 1):
+            self._attempts[job] = attempt
             try:
                 await self._summarize_and_store(job)
+                self._failed_jobs.pop(job, None)
                 return  # สำเร็จ ออกจาก loop ได้เลย
             except Exception as e:
                 if attempt < self.cfg.max_retries:
@@ -240,6 +366,10 @@ class SummaryWorker:
                     )
                     await asyncio.sleep(self.cfg.retry_delay_seconds)
                 else:
+                    self._failed_jobs[job] = SummaryFailureInfo(
+                        attempts=attempt,
+                        error=str(e),
+                    )
                     logger.error(
                         f"[bold red]❌ Summary failed after {self.cfg.max_retries} "
                         f"attempts for {job.file_name}: {e}[/]"
@@ -262,31 +392,60 @@ class SummaryWorker:
 
         logger.info(f"Found {len(nodes)} nodes for {job.file_name}")
 
-        # 2. Summarize ด้วย SummaryIndex
-        summary_index = SummaryIndex(nodes)
-        engine = summary_index.as_query_engine(
-            llm=self.llm,
-            response_mode="tree_summarize",
-            use_async=True,
-        )
-        result = await engine.aquery(self.cfg.summarize_prompt)
-        summary_text = str(result).strip()
+        # 2. Summarize ด้วย primary LLM ก่อน ถ้าพังค่อยใช้ fallback LLM
+        try:
+            summary_text = await self._summarize_with_llm(nodes, self.llm)
+        except Exception as primary_error:
+            if not self.fallback_llm:
+                raise
 
-        if not summary_text:
-            raise ValueError("Summarization returned empty result")
+            logger.warning(
+                f"[yellow]Primary summary LLM failed for {job.file_name}: {primary_error} "
+                f"— trying fallback LLM[/]"
+            )
+            try:
+                summary_text = await self._summarize_with_llm(nodes, self.fallback_llm)
+                logger.info(
+                    f"[bold green]✅ Fallback summary LLM succeeded[/] for {job.file_name}"
+                )
+            except Exception as fallback_error:
+                raise RuntimeError(
+                    f"Primary and fallback summary LLM failed for {job.file_name}. "
+                    f"primary_error={primary_error}; fallback_error={fallback_error}"
+                ) from fallback_error
 
-        # 3. เก็บลง Redis
-        await asyncio.to_thread(
-            self.chat_store._redis_client.setex,
-            job.redis_key,
-            self.cfg.redis_ttl_seconds,
-            summary_text,
-        )
+        # 3. เก็บลง Redis (ถ้าไม่ตั้ง TTL จะใช้ key แบบไม่หมดอายุ)
+        if self.cfg.redis_ttl_seconds is None:
+            await asyncio.to_thread(
+                self.chat_store._redis_client.set,
+                job.redis_key,
+                summary_text,
+            )
+        else:
+            await asyncio.to_thread(
+                self.chat_store._redis_client.setex,
+                job.redis_key,
+                self.cfg.redis_ttl_seconds,
+                summary_text,
+            )
 
         logger.info(
             f"[bold green]✅ Summary stored[/] — key={job.redis_key} "
             f"({len(summary_text)} chars)"
         )
+
+    async def _summarize_with_llm(self, nodes: list, llm: Any) -> str:
+        summary_index = SummaryIndex(nodes)
+        engine = summary_index.as_query_engine(
+            llm=llm,
+            response_mode="tree_summarize",
+            use_async=True,
+        )
+        result = await engine.aquery(self.cfg.summarize_prompt)
+        summary_text = str(result).strip()
+        if not summary_text:
+            raise ValueError("Summarization returned empty result")
+        return summary_text
 
     def _get_nodes_for_job(self, job: SummaryJob) -> list:
         """ดึง nodes ที่ตรงกับ file_name + channel_id จาก nodes_cache"""
@@ -310,6 +469,14 @@ class SummaryWorker:
             return raw.decode() if raw else None
         except Exception as e:
             logger.warning(f"Redis GET failed (key={key}): {e}")
+            return None
+
+    def _queue_position(self, job: SummaryJob) -> int | None:
+        """คืนลำดับของ job ในคิว (เริ่มที่ 1) ถ้าอยู่ในคิวจริง"""
+        try:
+            snapshot = list(self._queue._queue)  # noqa: SLF001 - ใช้เพื่อ diagnostics ภายใน
+            return snapshot.index(job) + 1
+        except ValueError:
             return None
 
     # ── Diagnostics ───────────────────────────

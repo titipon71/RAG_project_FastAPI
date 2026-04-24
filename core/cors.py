@@ -5,13 +5,13 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5500",
     "https://lukeenortaed.site",
     "https://www.lukeenortaed.site",
-    "https://*.ngrok-free.app",
     "https://project-rag-frontend.vercel.app",
     "https://docsmind-rag.lukeenortaed.site",
     "https://titipon71.github.io",
     "https://project-rag-six.vercel.app",
     "http://172.20.10.3:3000",
-    "http://192.168.1.122:3000",
+    "http://thinkhub.kmutnb.ac.th",
+    "http://thinkhub.kmutnb.ac.th/",
 ]
 
-ALLOW_ORIGIN_REGEX = r"https://.*\.ngrok-free\.app"
+ALLOW_ORIGIN_REGEX = r"https://.*\.ngrok-free\.app"  # ✅ ครอบคลุม ngrok ทุก subdomain

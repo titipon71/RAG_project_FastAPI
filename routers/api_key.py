@@ -17,6 +17,7 @@ from db.session import get_db
 from db.models.user import User
 from db.models.channel import Channel
 from db.models.api_key import ApiKey
+from db.models.file import File
 from schemas.api_key import ApiKeyCreate, ApiKeyRevoke, ApiKeyResponse, ApiKeyListResponse
 from schemas.chat import ExternalChatRequest
 from rag_enginex import rag_engine
@@ -24,6 +25,52 @@ from rag_enginex import rag_engine
 logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter()
+
+
+async def _resolve_source_filenames(
+    db: AsyncSession,
+    channel_id: int,
+    raw_sources: List[str],
+) -> List[str]:
+    if not raw_sources:
+        return []
+
+    stmt = select(File.original_filename, File.storage_uri).where(File.channel_id == channel_id)
+    res = await db.execute(stmt)
+    files_in_channel = res.all()
+
+    source_to_original: dict[str, str] = {}
+    for original_filename, storage_uri in files_in_channel:
+        original = str(original_filename)
+        storage = str(storage_uri or "").replace("\\", "/")
+        if not storage:
+            continue
+
+        source_to_original.setdefault(storage, original)
+        source_to_original.setdefault(storage.rsplit("/", 1)[-1], original)
+
+    resolved: List[str] = []
+    seen: set[str] = set()
+
+    for source in raw_sources:
+        source_text = str(source or "").strip()
+        if not source_text:
+            continue
+
+        normalized = source_text.replace("\\", "/").split("?", 1)[0].split("#", 1)[0]
+        basename = normalized.rsplit("/", 1)[-1]
+
+        display_name = (
+            source_to_original.get(normalized)
+            or source_to_original.get(basename)
+            or source_text
+        )
+
+        if display_name not in seen:
+            seen.add(display_name)
+            resolved.append(display_name)
+
+    return resolved
 
 
 # ============================================================
@@ -76,7 +123,7 @@ async def create_api_key(
         new_key = ApiKey(
             user_id=current_user.users_id,
             channel_id=real_channel_id,
-            key_hash=raw_key,
+            key_hash=hash_key(raw_key),
             name=payload.name
         )
 
@@ -188,7 +235,7 @@ async def refresh_api_key(
             # สร้าง key ใหม่
             new_raw_key = "sk-" + secrets.token_urlsafe(32)
 
-            api_key.key_hash = new_raw_key
+            api_key.key_hash = hash_key(new_raw_key)
 
             await db.flush()
             await db.refresh(api_key)
@@ -294,11 +341,21 @@ async def public_chat_api(
         logger.error(f"RAG Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal AI Error")
 
-    return {
+    raw_sources = result.get("sources", [])
+    if not isinstance(raw_sources, list):
+        raw_sources = [raw_sources]
+
+    resolved_sources = await _resolve_source_filenames(
+        db=db,
+        channel_id=real_channel_id,
+        raw_sources=raw_sources,
+    )
+
+    response_payload = {
         "id": payload.conversation_id or f"chatcmpl-{uuid.uuid4()}",
         "object": "chat.completion",
         "created": int(datetime.now().timestamp()),
-        "model": "qwen3:1.7b",
+        "model": "Ministral 3 3B",
         "choices": [{
             "index": 0,
             "message": {
@@ -308,5 +365,12 @@ async def public_chat_api(
             "finish_reason": "stop"
         }],
         "usage": result["usage"],
-        "sources": result.get("sources", []),
+        "sources": resolved_sources,
     }
+
+    if "summary_status" in result:
+        response_payload["summary_status"] = result["summary_status"]
+    if "from_summary" in result:
+        response_payload["from_summary"] = result["from_summary"]
+
+    return response_payload
