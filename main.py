@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
     
 app = FastAPI(
-    title="KMUTNBLM (FastAPI + MariaDB + JWT)",
+    title="ThinkHub Router API",
     root_path="/fastapi",
     openapi_url="/openapi.json",
     openapi_tags=tags_metadata,

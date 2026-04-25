@@ -106,6 +106,11 @@ class AppConfig:
     SUMMARY_FALLBACK_OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     SUMMARY_FALLBACK_OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     SUMMARY_FALLBACK_OPENROUTER_CONTEXT_WINDOW: int = int(os.getenv("OPENROUTER_CONTEXT_WINDOW", "262144"))
+
+    # Quick Questions (generated from summary)
+    QUICK_QUESTIONS_ENABLED: bool = os.getenv("QUICK_QUESTIONS_ENABLED", "true").lower() == "true"
+    QUICK_QUESTIONS_COUNT: int = int(os.getenv("QUICK_QUESTIONS_COUNT", "5"))
+    QUICK_QUESTIONS_MAX_SUMMARY_CHARS: int = int(os.getenv("QUICK_QUESTIONS_MAX_SUMMARY_CHARS", "6000"))
     
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -266,6 +271,9 @@ class RAGService:
                 max_retries=3,
                 retry_delay_seconds=5.0,
                 max_queue_size=500,
+                quick_questions_enabled=config.QUICK_QUESTIONS_ENABLED,
+                quick_questions_count=config.QUICK_QUESTIONS_COUNT,
+                quick_questions_max_summary_chars=config.QUICK_QUESTIONS_MAX_SUMMARY_CHARS,
             ),
         )
 
@@ -466,6 +474,33 @@ class RAGService:
         )
         return db, vector_store
 
+    @staticmethod
+    def _sanitize_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, str]:
+        """
+        Keep metadata schema stable for LanceDB inserts.
+        This prevents runtime failures when loaders introduce new fields
+        (e.g. page_label) that are not present in the existing table schema.
+        """
+        raw = metadata or {}
+        stable_keys = ("channel_id", "files_id", "filename", "file_name", "source")
+
+        cleaned: Dict[str, str] = {}
+        for key in stable_keys:
+            value = raw.get(key)
+            if value is not None:
+                cleaned[key] = str(value)
+
+        if "channel_id" not in cleaned:
+            cleaned["channel_id"] = "global"
+
+        # Keep both aliases to avoid downstream key mismatch.
+        if "file_name" not in cleaned and "filename" in cleaned:
+            cleaned["file_name"] = cleaned["filename"]
+        if "filename" not in cleaned and "file_name" in cleaned:
+            cleaned["filename"] = cleaned["file_name"]
+
+        return cleaned
+
     def _load_or_create_index(self) -> VectorStoreIndex:
         try:
             existing_tables = self.lance_db.table_names()
@@ -490,8 +525,7 @@ class RAGService:
             try:
                 documents = SimpleDirectoryReader(config.DATA_DIR).load_data()
                 for d in documents:
-                    d.metadata = d.metadata or {}
-                    d.metadata.setdefault("channel_id", "global")
+                    d.metadata = self._sanitize_metadata(d.metadata)
             except Exception as read_err:
                 logger.error(f"Error reading directory: {read_err}")
 
@@ -710,9 +744,7 @@ class RAGService:
         logger.info(f"Adding [bold]{len(docs)}[/] documents...")
 
         for d in docs:
-            d.metadata = d.metadata or {}
-            if "channel_id" not in d.metadata:
-                d.metadata["channel_id"] = "global"
+            d.metadata = self._sanitize_metadata(d.metadata)
 
         try:
             new_nodes = self.node_parser.get_nodes_from_documents(docs)

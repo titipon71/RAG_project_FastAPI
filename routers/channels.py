@@ -20,7 +20,7 @@ from starlette.datastructures import UploadFile
 from core.config import settings
 from core.enums import RoleChannel, ModerationDecision, RoleUser
 from core.hashids import encode_id, decode_id
-from core.security import get_current_user
+from core.security import get_current_user, get_optional_current_user
 from core.sse_manager import sse_manager
 from db.models.account_type import AccountType
 from db.session import get_db
@@ -52,6 +52,15 @@ UPLOAD_ROOT = settings.upload_root
 MAX_SIZE_PER_FILE = 1 * 1024 * 1024 * 1024  # 1 GB
 ALLOW_MIME = {"application/pdf",
               "text/plain"}
+
+DEFAULT_QUICK_QUESTIONS = [
+    "ช่วยสรุปเนื้อหาหลักจากเอกสารในช่องนี้ให้หน่อย",
+    "ประเด็นสำคัญ 3 ข้อแรกของเอกสารนี้คืออะไร",
+    "มีข้อกำหนดหรือเดดไลน์อะไรที่ควรรู้บ้าง",
+    "ช่วยยกตัวอย่างการใช้งานจากเอกสารนี้แบบสั้นๆ",
+    "ถ้าต้องเริ่มทำงานจากเอกสารนี้ ควรเริ่มตรงไหนก่อน",
+]
+MAX_RETURN_QUICK_QUESTIONS = 10
 
 try:
     import magic
@@ -880,7 +889,7 @@ async def list_pending_channels(
         )
 
 @router.get("/channels/public/list/", response_model=List[ChannelListPublicItem], tags=["Channels"])
-async def list__channels(
+async def list_public_channels(
     search_by_key_and_name: str | None = Query(None, description="ค้นหาจากชื่อหรือ search_key"),
     skip: int = 0,
     limit: int = 100,
@@ -1147,4 +1156,107 @@ async def get_channel_file_size_balance(
         used_storage_bytes=used_storage,
         storage_limit_bytes=storage_limit
     )
+
+
+@router.get("/channels/quick-questions/list/", response_model=List[str], tags=["Channels"])
+async def list_quick_questions(
+    channel_id: str = Query(..., description="Hashed channel ID"),
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):     
+    decoded_channel_id = decode_id(channel_id)
+    if decoded_channel_id is None:
+        raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
+
+    result = await db.execute(
+        select(Channel).where(Channel.channels_id == decoded_channel_id)
+    )
+    channel = result.scalar_one_or_none()
+    if channel is None:
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
+
+    user_id = current_user.users_id if current_user else None
     
+    is_private_like = channel.status in (RoleChannel.private, RoleChannel.pending)
+    
+    if user_id:
+        is_admin = (current_user.role == RoleUser.admin)
+        is_owner = (channel.created_by == user_id)
+        
+        if is_private_like and not (is_owner or is_admin):
+            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์เข้าถึง Channel นี้")
+    else:
+        if channel.status != RoleChannel.public:
+            raise HTTPException(
+                status_code=401, 
+                detail="กรุณาเข้าสู่ระบบเพื่อใช้งาน Channel ส่วนตัว"
+            )
+            
+    quick_questions_by_file = (
+        await rag_engine.summary_worker.get_all_quick_questions_for_channel(
+            str(decoded_channel_id)
+        )
+    )
+
+    if not quick_questions_by_file:
+        return DEFAULT_QUICK_QUESTIONS
+
+    merged_questions: list[str] = []
+    seen: set[str] = set()
+
+    for _, questions in sorted(quick_questions_by_file.items()):
+        for question in questions:
+            clean_q = question.strip()
+            if not clean_q or clean_q in seen:
+                continue
+
+            seen.add(clean_q)
+            merged_questions.append(clean_q)
+
+            if len(merged_questions) >= MAX_RETURN_QUICK_QUESTIONS:
+                return merged_questions
+
+    return merged_questions or DEFAULT_QUICK_QUESTIONS
+
+
+@router.post("/channels/{channel_id}/quick-questions/regenerate", tags=["Channels"])
+async def regenerate_quick_questions(
+    channel_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if rag_engine is None:
+        raise HTTPException(status_code=503, detail="RAG Engine ยังไม่พร้อมใช้งาน")
+
+    decoded_channel_id = decode_id(channel_id)
+    if decoded_channel_id is None:
+        raise HTTPException(status_code=404, detail="Channel ID ไม่ถูกต้อง")
+
+    result = await db.execute(
+        select(Channel).where(Channel.channels_id == decoded_channel_id)
+    )
+    channel = result.scalar_one_or_none()
+    if channel is None:
+        raise HTTPException(status_code=404, detail="ไม่พบ Channel")
+
+    is_owner = channel.created_by == current_user.users_id
+    is_admin = current_user.role == RoleUser.admin
+    if not (is_owner or is_admin):
+        raise HTTPException(
+            status_code=403,
+            detail="เฉพาะเจ้าของหรือแอดมินเท่านั้นที่สามารถ regenerate quick questions ได้",
+        )
+
+    regenerate_result = await rag_engine.summary_worker.regenerate_quick_questions_for_channel(
+        str(decoded_channel_id)
+    )
+
+    return {
+        "channel_id": channel_id,
+        **regenerate_result,
+        "message": (
+            "ลบ quick questions เก่าและสร้างใหม่เรียบร้อย"
+            if regenerate_result.get("regenerated_files", 0) > 0
+            else "ลบ quick questions เก่าแล้ว แต่ยังไม่มี summary สำหรับสร้างใหม่"
+        ),
+    }

@@ -150,7 +150,7 @@ async def update_user_file_size(
             detail="Unexpected server error"
         )
         
-@router.put('users/file-set-default/{user_id}', response_model=UserOut, tags=["Users"])
+@router.put('/users/file-set-default/{user_id}', response_model=UserOut, tags=["Users"])
 async def set_user_file_size_default(
     user_id: int = Path(..., gt=0),
     db: AsyncSession = Depends(get_db),

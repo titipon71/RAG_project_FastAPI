@@ -4,13 +4,16 @@ summary_worker.py
 Background summarization worker สำหรับ RAG Engine
 - รัน summarize ใน asyncio background task ไม่บล็อก upload
 - เก็บผลลัพธ์ลง Redis ด้วย key  `summary:{channel_id}:{file_name}`
+- เก็บ quick questions ด้วย key `quick_questions:{channel_id}:{file_name}`
 - รองรับ retry, graceful shutdown, และ dedup job
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING, Any
@@ -38,6 +41,24 @@ class SummaryWorkerConfig:
     )
     # ป้องกัน queue ใหญ่เกินไปถ้า upload พร้อมกันเยอะ
     max_queue_size: int = 500
+    quick_questions_enabled: bool = True
+    quick_questions_count: int = 5
+    quick_questions_max_summary_chars: int = 6000
+    quick_questions_prompt: str = (
+        "จาก summary ด้านล่าง ให้สร้างคำถามปูพื้นภาษาไทย จำนวน {count} ข้อ\n"
+        "เป้าหมาย: ช่วยผู้ใช้ที่ยังไม่รู้จักเอกสารนี้เลยให้เริ่มต้นสนทนาได้\n\n"
+        "รูปแบบที่ต้องการ:\n"
+        "- 'X คืออะไร?'\n"
+        "- 'ใครคือ Y?'\n"
+        "- 'Z มีไว้เพื่ออะไร?'\n\n"
+        "กติกา:\n"
+        "- X/Y/Z ต้องเป็นชื่อ entity จริงจากเอกสารนี้ ห้ามสร้างขึ้นมาเอง\n"
+        "- ไม่เกิน 10 คำต่อข้อ\n"
+        "- ครอบคลุมหลาย entity ไม่ถามซ้ำกัน\n"
+        "Output: JSON array ของ string เท่านั้น ห้ามมีข้อความอื่น ห้ามใส่เลขหรือ bullet\n\n"
+        "ชื่อไฟล์: {file_name}\n"
+        "[SUMMARY]\n{summary}\n"
+    )
 
 
 # ──────────────────────────────────────────────
@@ -52,6 +73,10 @@ class SummaryJob:
     @property
     def redis_key(self) -> str:
         return f"summary:{self.channel_id}:{self.file_name}"
+
+    @property
+    def quick_questions_redis_key(self) -> str:
+        return f"quick_questions:{self.channel_id}:{self.file_name}"
 
 
 @dataclass(frozen=True)
@@ -201,16 +226,120 @@ class SummaryWorker:
             logger.warning(f"get_all_for_channel failed: {e}")
             return {}
 
+    async def get_quick_questions(self, channel_id: str, file_name: str) -> list[str] | None:
+        """ดึง quick questions ของไฟล์เดียวจาก Redis"""
+        job = SummaryJob(channel_id=str(channel_id), file_name=str(file_name))
+        payload = await self._redis_get(job.quick_questions_redis_key)
+        if not payload:
+            return None
+
+        try:
+            parsed = json.loads(payload)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception as e:
+            logger.warning(
+                f"Failed to parse quick questions payload for {job.quick_questions_redis_key}: {e}"
+            )
+        return None
+
+    async def get_all_quick_questions_for_channel(self, channel_id: str) -> dict[str, list[str]]:
+        """
+        ดึง quick questions ทุกไฟล์ของ channel นี้จาก Redis
+        คืน dict[file_name, quick_questions]
+        """
+        pattern = f"quick_questions:{channel_id}:*"
+        try:
+            keys: list[bytes] = await asyncio.to_thread(
+                self.chat_store._redis_client.keys, pattern
+            )
+            result: dict[str, list[str]] = {}
+            for key_bytes in keys:
+                key = key_bytes.decode()
+                raw = await self._redis_get(key)
+                if not raw:
+                    continue
+
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    parsed = None
+
+                if isinstance(parsed, list):
+                    questions = [str(item).strip() for item in parsed if str(item).strip()]
+                    if questions:
+                        file_name = key.split(":", 2)[-1]
+                        result[file_name] = questions
+            return result
+        except Exception as e:
+            logger.warning(f"get_all_quick_questions_for_channel failed: {e}")
+            return {}
+
+    async def regenerate_quick_questions_for_channel(self, channel_id: str) -> dict[str, Any]:
+        """
+        ลบ quick questions เดิมของ channel แล้วสร้างใหม่จาก summary ที่มีใน Redis
+        """
+        real_channel_id = str(channel_id)
+        deleted_quick_question_keys = await self._redis_delete_keys_by_pattern(
+            f"quick_questions:{real_channel_id}:*"
+        )
+
+        summaries = await self.get_all_for_channel(real_channel_id)
+        if not summaries:
+            return {
+                "channel_id": real_channel_id,
+                "deleted_quick_question_keys": deleted_quick_question_keys,
+                "total_summaries": 0,
+                "regenerated_files": 0,
+                "failed_files": {},
+            }
+
+        regenerated_files = 0
+        failed_files: dict[str, str] = {}
+
+        for file_name, summary_text in sorted(summaries.items()):
+            job = SummaryJob(channel_id=real_channel_id, file_name=file_name)
+            try:
+                questions = await self._generate_quick_questions_from_summary(
+                    summary_text=summary_text,
+                    file_name=file_name,
+                )
+                if not questions:
+                    raise ValueError("Quick questions generation returned empty result")
+
+                await self._store_quick_questions(job, questions)
+                regenerated_files += 1
+            except Exception as e:
+                failed_files[file_name] = str(e)
+                logger.warning(
+                    f"Regenerate quick questions failed for {file_name}: {e}"
+                )
+
+        return {
+            "channel_id": real_channel_id,
+            "deleted_quick_question_keys": deleted_quick_question_keys,
+            "total_summaries": len(summaries),
+            "regenerated_files": regenerated_files,
+            "failed_files": failed_files,
+        }
+
     async def delete(self, channel_id: str, file_name: str) -> None:
-        """ลบ summary ออกจาก Redis (เรียกตอน delete document)"""
+        """ลบ summary และ quick questions ออกจาก Redis (เรียกตอน delete document)"""
         job = SummaryJob(channel_id=str(channel_id), file_name=str(file_name))
         try:
             await asyncio.to_thread(
-                self.chat_store._redis_client.delete, job.redis_key
+                self.chat_store._redis_client.delete,
+                job.redis_key,
+                job.quick_questions_redis_key,
             )
-            logger.info(f"🗑️ Deleted summary: {job.redis_key}")
+            logger.info(
+                f"🗑️ Deleted summary + quick questions: {job.redis_key} / "
+                f"{job.quick_questions_redis_key}"
+            )
         except Exception as e:
-            logger.warning(f"Failed to delete summary {job.redis_key}: {e}")
+            logger.warning(
+                f"Failed to delete summary/quick questions for {job.redis_key}: {e}"
+            )
 
     async def is_ready(self, channel_id: str, file_name: str) -> dict[str, Any]:
         """
@@ -434,6 +563,20 @@ class SummaryWorker:
             f"({len(summary_text)} chars)"
         )
 
+        if self.cfg.quick_questions_enabled:
+            try:
+                quick_questions = await self._generate_quick_questions_from_summary(
+                    summary_text=summary_text,
+                    file_name=job.file_name,
+                )
+                if quick_questions:
+                    await self._store_quick_questions(job, quick_questions)
+            except Exception as e:
+                # ไม่ให้ quick question ล้มแล้วลากให้ summary flow fail
+                logger.warning(
+                    f"Quick question generation failed for {job.file_name}: {e}"
+                )
+
     async def _summarize_with_llm(self, nodes: list, llm: Any) -> str:
         summary_index = SummaryIndex(nodes)
         engine = summary_index.as_query_engine(
@@ -446,6 +589,120 @@ class SummaryWorker:
         if not summary_text:
             raise ValueError("Summarization returned empty result")
         return summary_text
+
+    async def _store_quick_questions(self, job: SummaryJob, questions: list[str]) -> None:
+        payload = json.dumps(questions, ensure_ascii=False)
+        if self.cfg.redis_ttl_seconds is None:
+            await asyncio.to_thread(
+                self.chat_store._redis_client.set,
+                job.quick_questions_redis_key,
+                payload,
+            )
+        else:
+            await asyncio.to_thread(
+                self.chat_store._redis_client.setex,
+                job.quick_questions_redis_key,
+                self.cfg.redis_ttl_seconds,
+                payload,
+            )
+
+        logger.info(
+            f"[bold green]✅ Quick questions stored[/] — key={job.quick_questions_redis_key} "
+            f"({len(questions)} items)"
+        )
+
+    async def _generate_quick_questions_from_summary(
+        self,
+        summary_text: str,
+        file_name: str,
+    ) -> list[str]:
+        summary_text = summary_text.strip()
+        if not summary_text:
+            return []
+
+        trimmed_summary = summary_text[: self.cfg.quick_questions_max_summary_chars]
+        prompt = self.cfg.quick_questions_prompt.format(
+            count=self.cfg.quick_questions_count,
+            file_name=file_name,
+            summary=trimmed_summary,
+        )
+
+        try:
+            raw = await self.llm.acomplete(prompt)
+            questions = self._extract_quick_questions(str(raw).strip())
+        except Exception as primary_error:
+            if not self.fallback_llm:
+                raise
+
+            logger.warning(
+                f"[yellow]Primary quick-question LLM failed for {file_name}: {primary_error} "
+                f"— trying fallback LLM[/]"
+            )
+            raw_fallback = await self.fallback_llm.acomplete(prompt)
+            questions = self._extract_quick_questions(str(raw_fallback).strip())
+
+        if not questions and self.fallback_llm:
+            raw_fallback = await self.fallback_llm.acomplete(prompt)
+            questions = self._extract_quick_questions(str(raw_fallback).strip())
+
+        if not questions:
+            raise ValueError("Quick questions generation returned empty result")
+
+        return questions[: self.cfg.quick_questions_count]
+
+    def _extract_quick_questions(self, raw_text: str) -> list[str]:
+        """รองรับทั้ง JSON array และ plain-text list จาก LLM"""
+        parsed_json = self._parse_json_array(raw_text)
+        if parsed_json:
+            return parsed_json
+
+        lines = []
+        for line in raw_text.splitlines():
+            clean = re.sub(r"^\s*(?:[-*•]|\d+[\.)])\s*", "", line).strip()
+            if clean:
+                lines.append(clean)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in lines:
+            normalized = item.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+
+        return deduped
+
+    @staticmethod
+    def _parse_json_array(raw_text: str) -> list[str]:
+        candidate = raw_text.strip()
+
+        # รองรับกรณีโมเดลครอบด้วย markdown code fence
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```[a-zA-Z]*\n", "", candidate)
+            candidate = candidate.removesuffix("```").strip()
+
+        start = candidate.find("[")
+        end = candidate.rfind("]")
+        if start >= 0 and end > start:
+            candidate = candidate[start : end + 1]
+
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, list):
+                deduped: list[str] = []
+                seen: set[str] = set()
+                for item in parsed:
+                    text = str(item).strip()
+                    if not text or text in seen:
+                        continue
+                    seen.add(text)
+                    deduped.append(text)
+                return deduped
+        except Exception:
+            return []
+
+        return []
 
     def _get_nodes_for_job(self, job: SummaryJob) -> list:
         """ดึง nodes ที่ตรงกับ file_name + channel_id จาก nodes_cache"""
@@ -470,6 +727,23 @@ class SummaryWorker:
         except Exception as e:
             logger.warning(f"Redis GET failed (key={key}): {e}")
             return None
+
+    async def _redis_delete_keys_by_pattern(self, pattern: str) -> int:
+        try:
+            keys: list[bytes] = await asyncio.to_thread(
+                self.chat_store._redis_client.keys, pattern
+            )
+            if not keys:
+                return 0
+
+            decoded_keys = [key.decode() for key in keys]
+            deleted_count = await asyncio.to_thread(
+                self.chat_store._redis_client.delete, *decoded_keys
+            )
+            return int(deleted_count or 0)
+        except Exception as e:
+            logger.warning(f"Redis delete by pattern failed (pattern={pattern}): {e}")
+            return 0
 
     def _queue_position(self, job: SummaryJob) -> int | None:
         """คืนลำดับของ job ในคิว (เริ่มที่ 1) ถ้าอยู่ในคิวจริง"""
