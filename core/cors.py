@@ -12,6 +12,7 @@ ALLOWED_ORIGINS = [
     "http://172.20.10.3:3000",
     "http://thinkhub.kmutnb.ac.th",
     "http://thinkhub.kmutnb.ac.th/",
+    "http://127.0.0.1:5500"
 ]
 
 ALLOW_ORIGIN_REGEX = r"https://.*\.ngrok-free\.app"  # ✅ ครอบคลุม ngrok ทุก subdomain

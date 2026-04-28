@@ -123,7 +123,7 @@ async def create_api_key(
         new_key = ApiKey(
             user_id=current_user.users_id,
             channel_id=real_channel_id,
-            key_hash=hash_key(raw_key),
+            key_hash=raw_key, # ไม่ ต้อง hash เพราะเราจะไม่เก็บ key จริงไว้เลย แต่ถ้าต้องการ hash ก็ทำได้เช่นกัน
             name=payload.name
         )
 
